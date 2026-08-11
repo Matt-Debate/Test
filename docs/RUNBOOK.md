@@ -117,7 +117,7 @@ assistant asks which one — nothing is guessed silently.
 
 ```bash
 pip install -r requirements.txt
-python3 -m unittest discover -s tests        # 355 tests, sqlite, no server
+python3 -m unittest discover -s tests        # 362 tests, sqlite, no server
 python3 scripts/mint_link.py --label dev     # local sqlite file
 python3 -m app.main                          # http://localhost:8080
 ```

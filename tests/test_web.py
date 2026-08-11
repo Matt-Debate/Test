@@ -1976,38 +1976,76 @@ class ClassAddFormTests(unittest.TestCase):
                '  $("classesBody").addEventListener("click"')
     ENDPOINT = "classes-add"
 
-    def submit(self, fields: dict, response: dict | None = None) -> dict:
-        """`response` is what the server answers with — the add handler now
-        reads it back to build its confirmation, so a test that left it empty
-        could not tell an echo of the response from an echo of the form."""
+    def submit(self, fields: dict, response: dict | None = None,
+               reject: dict | None = None) -> dict:
+        """Drive the real submit handler.
+
+        `response` is what the server answers with — the add handler reads it
+        back to build its confirmation, so a test that left it empty could not
+        tell an echo of the response from an echo of the form. `reject` drives
+        the `.catch` branch instead: the real `api()` throws on a refusal, and
+        a stub that always resolves cannot tell "cleared the form after a
+        confirmed write" from "cleared it after a 400".
+
+        `money` and `categoryLabel` are SLICED FROM THE PORTAL rather than
+        stubbed. Hand-written versions were both more permissive than the real
+        ones — `toFixed(2)` for `toLocaleString`, and the raw category key for
+        its bilingual label — so the description-less confirmation path was
+        asserting against a stub's behaviour, not the portal's (LESSONS §3).
+        """
         import json
 
         src = self.PORTAL.read_text(encoding="utf-8")
         start, end = self.HANDLER
         block = src[src.index(start):src.index(end)]
         self.assertIn(self.ENDPOINT, block, "block markers moved")
+        # `handlerFn` keeps the LAST listener registered anywhere in the block,
+        # so a second one silently swaps out the handler under test with
+        # nothing failing. Pin the count.
+        self.assertEqual(
+            block.count("addEventListener("), 1,
+            "the extracted block registers more than one listener — `handlerFn` "
+            "would silently be the last of them, not the handler under test",
+        )
+        real = (src[src.index("  var STR = {"):src.index("  var lang =")]
+                + 'var lang = "zh";\n'
+                + src[src.index("  function money(n) {"):src.index("  function money0(n) {")]
+                + src[src.index("  function categoryLabel(e) {"):src.index("  function isBorrow(e) {")])
         script = f"""
 var nodes = {json.dumps(fields)}, sent = null, toasts = [], handlerFn = null;
+var refreshes = 0, listeners = 0;
 for (var k in nodes) nodes[k] = {{value: nodes[k]}};
 nodes.addClsWrap = {{open: true}}; nodes.addWrap = {{open: true}};
-function refresh() {{}}
+function refresh() {{ refreshes += 1; }}
 function todayStr() {{ return "2026-08-11"; }}
 function $(id) {{ if (!nodes[id]) nodes[id] = {{value: ""}};
-  nodes[id].addEventListener = function (_e, fn) {{ handlerFn = fn; }};
+  nodes[id].addEventListener = function (_e, fn) {{ listeners += 1; handlerFn = fn; }};
   return nodes[id]; }}
 function t(k) {{ return k; }}
-function toast(m) {{ toasts.push(String(m)); }}
-function refreshClasses() {{}}
+function toast(m, ms) {{ toasts.push({{msg: String(m), ms: ms === undefined ? null : ms}}); }}
+function refreshClasses() {{ refreshes += 1; }}
+var REJECT = {json.dumps(reject)};
 function api(name, body) {{
   sent = {{name: name, body: body}};
-  return {{then: function (f) {{ f({json.dumps(response or {})}); return this; }},
-           catch: function () {{ return this; }}}};
+  var chain = {{
+    then: function (f) {{ if (!REJECT) {{ f({json.dumps(response or {})}); }} return chain; }},
+    catch: function (f) {{ if (REJECT) {{ f(REJECT); }} return chain; }},
+  }};
+  return chain;
 }}
-function money(n) {{ return "\\u00a5" + Number(n || 0).toFixed(2); }}
-function categoryLabel(e) {{ return e.category || ""; }}
+{real}
 {block}
 handlerFn({{preventDefault: function () {{}}}});
-console.log(JSON.stringify({{sent: sent, toasts: toasts}}));
+console.log(JSON.stringify({{
+  sent: sent,
+  toasts: toasts.map(function (x) {{ return x.msg; }}),
+  toast_ms: toasts.map(function (x) {{ return x.ms; }}),
+  refreshes: refreshes,
+  listeners: listeners,
+  fields: {{amount: nodes.amount && nodes.amount.value,
+            desc: nodes.desc && nodes.desc.value,
+            drawer_open: nodes.addWrap.open}},
+}}));
 """
         out = subprocess.run(["node", "-e", script], capture_output=True,
                              text=True, timeout=30)
@@ -2145,6 +2183,50 @@ class ExpenseAddFormTests(ClassAddFormTests):
         toast = self.submit(dict(self.A_ROW), response={"ok": True})["toasts"][0]
         self.assertEqual(toast, "added")
 
+    def test_a_successful_add_repaints_the_list(self):
+        """The incident symptom, literally: "the page underneath did not move".
+        `refresh()` was a no-op stub that counted nothing, so deleting the call
+        left the suite green while she saw a toast over an unchanged list."""
+        self.assertEqual(self.submit(dict(self.A_ROW),
+                                     response=self.STORED)["refreshes"], 1)
+
+    def test_the_confirmation_stays_up_long_enough_to_read(self):
+        """3.2s, not the 1.7s default. The old harness dropped `toast`'s second
+        argument entirely, so the duration this release exists to change was
+        asserted by nothing — and `ms || 1700` silently restores the flash."""
+        self.assertEqual(self.submit(dict(self.A_ROW),
+                                     response=self.STORED)["toast_ms"], [3200])
+
+    def test_a_successful_add_clears_the_form_and_closes_the_drawer(self):
+        """addedMsg's comment justifies degrading the message by saying the
+        form still clears — an untested premise until now. If it does not, her
+        amount sits in the box under a success toast, which is the invitation
+        to the second submit this release exists to prevent."""
+        out = self.submit(dict(self.A_ROW), response=self.STORED)
+        self.assertEqual(out["fields"]["amount"], "")
+        self.assertEqual(out["fields"]["desc"], "")
+        self.assertFalse(out["fields"]["drawer_open"])
+
+    def test_a_refusal_clears_nothing_and_does_not_say_added(self):
+        """The `.catch` branch. The stub used to resolve unconditionally, so a
+        400 would have cleared the form and toasted "added" with every test
+        still passing — and she would have lost what she typed to a write that
+        never happened."""
+        out = self.submit(dict(self.A_ROW), reject={"message": "amount must be positive"})
+        self.assertEqual(out["toasts"], ["amount must be positive"])
+        self.assertEqual(out["refreshes"], 0)
+        self.assertEqual(out["fields"]["amount"], "2200")
+        self.assertTrue(out["fields"]["drawer_open"])
+
+    def test_a_row_with_no_description_is_named_by_its_category(self):
+        """`categoryLabel` is sliced from the portal now, not stubbed to return
+        the raw key — so this asserts she sees "Aden 运动", not "aden-sports"."""
+        stored = {"ok": True, "expense": dict(self.STORED["expense"],
+                                              description=None)}
+        toast = self.submit(dict(self.A_ROW), response=stored)["toasts"][0]
+        self.assertIn("Aden 运动", toast)
+        self.assertNotIn("aden-sports", toast)
+
     # not applicable — this form has no payment selector
     test_the_period_label_reaches_the_server_when_the_kind_uses_one = None
     test_the_class_count_is_sent_as_the_number_she_typed = None
@@ -2259,6 +2341,17 @@ console.log(JSON.stringify([_nodes.cards.innerHTML, _nodes.nowBody.innerHTML]));
         {"id": "office", "date": "2026-07-30", "amount": 31100.0,
          "category": "borrow", "description": "Borrowed — office",
          "paid": True, "paid_date": "2026-08-05"},
+        # Paid in JULY. Both sections say "this month"; without a row outside
+        # it, the month filter is inert in every fixture and deleting it keeps
+        # the suite green while 本月已付 totals every payment ever made. The
+        # card keeps its own month filter, so the two would silently disagree
+        # again — the exact defect this release shipped to fix.
+        {"id": "lastmonth", "date": "2026-07-31", "amount": 8888.0,
+         "category": "living", "description": "Paid in July",
+         "paid": True, "paid_date": "2026-07-28"},
+        {"id": "oldlent", "date": "2026-06-01", "amount": 777.0,
+         "category": "borrow", "description": "Repaid in July",
+         "paid": True, "paid_date": "2026-07-20"},
     ]
 
     def paid_figures(self) -> tuple:
@@ -2290,10 +2383,32 @@ console.log(JSON.stringify([_nodes.cards.innerHTML, _nodes.nowBody.innerHTML]));
     def test_a_repayment_is_still_shown_somewhere(self):
         """The complement. Excluding borrow from 本月已付 without giving it a
         home is the same defect as the 30-day filter: 待还我 carries only what
-        is still owed, so a repaid row would leave the tab entirely."""
+        is still owed, so a repaid row would leave the tab entirely.
+
+        Membership, not substrings: `section()` emits its header even for zero
+        rows, so "the row is in the body AND the header is in the body" is
+        satisfied by an implementation that leaves the row in 本月已付 beside
+        an empty 本月已还我.
+        """
         _, _, body = self.paid_figures()
-        self.assertIn('data-id="office"', body)
-        self.assertIn("本月已还我", body)
+        self.assertEqual(self.sections(body).get("本月已还我"), ["office"])
+
+    def test_only_this_months_payments_count_as_this_month(self):
+        """Both sections say 本月. Neither filter is exercised by a fixture
+        whose paid_date is in another month — delete either and the header
+        reads "this month" over every payment in the ledger, while the card
+        keeps its own filter and the two silently disagree again."""
+        _, _, body = self.paid_figures()
+        got = self.sections(body)
+        self.assertEqual(got.get("本月已付"), ["net", "rent"])
+        self.assertEqual(got.get("本月已还我"), ["office"])
+
+    def test_payments_are_listed_newest_first(self):
+        """Both lists sort by paid_date descending. With one row each the
+        comparator is unobservable, and it was rewritten this release."""
+        _, _, body = self.paid_figures()
+        # net was paid 08-10, rent 08-05
+        self.assertEqual(self.sections(body).get("本月已付"), ["net", "rent"])
 
     def a_sweep(self) -> list:
         """One unpaid row per day-offset across a 460-day span.
@@ -2357,9 +2472,11 @@ console.log(JSON.stringify([_nodes.cards.innerHTML, _nodes.nowBody.innerHTML]));
             days = (datetime.strptime(r["date"], "%Y-%m-%d") - today).days
             expected[self.NEAR if days <= 30 else self.LATER].append(r["id"])
 
-        got = self.sections(self.render_now(rows))
-        # the sweep is generated in ascending date order and both sections sort
-        # byDateAsc, so comparing lists pins the ORDER too
+        # fed in DESCENDING date order: the sweep is generated ascending, which
+        # is already the order both sections sort into, so a deleted .sort()
+        # was unobservable. Comparing lists now pins the ORDER as well as the
+        # membership.
+        got = self.sections(self.render_now(list(reversed(rows))))
         for name in (self.NEAR, self.LATER):
             with self.subTest(name):
                 actual = got.get(name, [])
@@ -2438,11 +2555,17 @@ console.log(JSON.stringify([_nodes.cards.innerHTML, _nodes.nowBody.innerHTML]));
             {"id": "owed", "date": "2027-01-01", "amount": 500,
              "category": "borrow", "description": "fronted it",
              "paid": False, "paid_date": None},
+            # a second unpaid borrow, dated EARLIER, so 待还我's sort is
+            # observable — with one row any comparator passes, and this one was
+            # rewritten to byDateAsc this release
+            {"id": "owed_older", "date": "2026-09-09", "amount": 60,
+             "category": "borrow", "description": "fronted it earlier",
+             "paid": False, "paid_date": None},
             {"id": "back", "date": "2026-07-30", "amount": 31100,
              "category": "borrow", "description": "repaid",
              "paid": True, "paid_date": "2026-08-05"},
         ]))
-        self.assertEqual(got.get("待还我"), ["owed"])
+        self.assertEqual(got.get("待还我"), ["owed_older", "owed"])
         self.assertEqual(got.get("本月已还我"), ["back"])
         for spending in ("待付 · 未来30天", "待付 · 30天以后", "本月已付"):
             self.assertEqual(got.get(spending, []), [],

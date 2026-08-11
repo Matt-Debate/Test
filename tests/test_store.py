@@ -166,6 +166,10 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.store.create(date="2026-07-14", amount=10,
                               paid=True, paid_date="2026-02-31")
+        # …and it was refused BEFORE the insert. Asserting only the raise lets
+        # the validation move below the INSERT and still pass, which would
+        # leave the bad row in the ledger.
+        self.assertEqual(self.store.list(), [], "the row was written anyway")
 
     def test_date_format(self):
         for bad in ("", None, "14/07/2026", "2026-7-4"):
