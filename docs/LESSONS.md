@@ -232,7 +232,21 @@ No test had ever executed `renderNow`. The suite was 341 tests green.
 **Rule.** When a view filters a set, ask where the complement is rendered. "Not
 shown here" must be "shown there", never "shown nowhere" — so partition ONE
 list rather than filtering with a predicate and dropping the remainder; the
-complement then cannot be forgotten. And confirm a write by echoing what the
+complement then cannot be forgotten.
+
+**Write the second half as the NEGATION, not as a second predicate.** The first
+fix used `<= 30` and `> 30`, which only *look* complementary: `daysBetween`
+returns `NaN` for a date no calendar has, and `NaN` satisfies neither — so the
+row was invisible again, by the same mechanism, in the code written to fix it.
+`!inWindow(e)` has no such hole whatever the comparison does. A cross-model
+review found this; three of my own passes did not. The store now rejects those
+dates too, but the renderer must not *depend* on that: rows written before a
+check existed are still in the database.
+
+**And test membership, not presence.** "Every row appears somewhere" cannot
+tell a partition from an overlap — a `>=` slip puts the boundary row in both
+sections and the assertion still passes. Assert each row appears exactly once,
+in the section it belongs to. And confirm a write by echoing what the
 **server stored**, not what the form held: a constant toast is
 indistinguishable from nothing happening, and echoing the form confirms a write
 that may not have happened that way. The guard for this is a sweep across the

@@ -55,6 +55,19 @@ Cut as a **minor** for the same reason 0.11.0 was: it changes what she sees.
   `待还我` carries only what is still *owed*, so a repaid row would have left
   the tab entirely. `Store.summarize` is untouched; both figures were
   portal-side sums.
+- **A date no calendar has is now refused.** `_validate_date` checked only the
+  *shape* (`^\d{4}-\d{2}-\d{2}$`), so `2026-13-01` and `2026-02-30` were
+  accepted and stored. Not a tidiness problem: every consumer that subtracts
+  such a date gets `NaN`, and the Due tab partitions on a comparison with it —
+  `NaN` is neither `<= 30` nor `> 30`, so the row rendered in **no section at
+  all**. The same defect this release was cut to fix, reachable by writing a bad
+  date through the MCP. Leap years still work (2028-02-29 in, 2027-02-29 out).
+- **The Due partition is a complement, not a second predicate.** `later` was
+  `> 30`, which only *looks* like the negation of `<= 30`; the two are not
+  complementary once `NaN` is possible. It is now `!inWindow(e)`, which cannot
+  have that hole whatever `daysBetween` returns — the renderer no longer
+  depends on the store's validation being perfect, and a bad row already in the
+  database still renders.
 - **A scheduled month in History announced itself wrongly.** The future branch
   of `renderHistory` was written separately from the past branch and drifted: no
   `aria-expanded`, no `open` class, so a screen reader heard a plain row and the
@@ -79,9 +92,29 @@ Cut as a **minor** for the same reason 0.11.0 was: it changes what she sees.
   on the figure that **excludes** what she fronted (both reading ¥55,499 would
   satisfy equality alone and still be wrong); and a repayment is still rendered
   somewhere.
-- All seven mutation-checked, each target verified green and resolvable first
-  (P5) — including a mutation that "fixes" the disagreement by making the card
-  count borrow too.
+- **The cross-model round rewrote the first draft of these tests.** `/codex-verify`
+  returned DO NOT SHIP on three counts, two of which the suite could not see:
+
+  - the sweep asserted each row appeared **at least once**, so an overlap was
+    invisible — a `>= 30` boundary slip puts day 30 in both sections and every
+    assertion still passed. It now splits the render into sections and asserts
+    each row appears **exactly once, in the expected one**;
+  - the borrow test asserted the row appeared with `st lend` somewhere. Removing
+    `!isBorrow` from the unpaid list renders it in the due list *and* 待还我, and
+    `stateOf` gives every copy `st lend` — so it passed. Membership is now the
+    assertion;
+  - all three confirmation tests used one fixture, which an `addedMsg` that
+    hard-codes that exact string would satisfy (LESSONS §3). Two distinct server
+    responses now go through the same form input.
+
+  It also found the `NaN` partition hole and the impossible-date write above, and
+  independently reported the 本月已付 disagreement that had been fixed an hour
+  earlier — arriving at the same defect from the other direction.
+- Ten mutation-checked in total, each target verified green and resolvable first
+  (P5). Four of them are the exact mutations Codex named as surviving the first
+  draft; two are "wrong fixes" that satisfy a weaker assertion — making the card
+  count borrow so both figures agree at ¥55,499, and hard-coding the
+  confirmation string.
 - `scripts/smoke_live.py` pins the 30-day boundary against real Postgres: a row
   200 days out is unpaid but not upcoming. Recorded there — and here — that this
   assertion would **not** have caught this bug: `/api/list` was correct

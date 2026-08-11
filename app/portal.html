@@ -699,15 +699,17 @@
     // Partitioning a single list means no row can fall between the halves the
     // way it fell off the end of the old one.
     var unpaid = expenses.filter(function (e) { return !e.paid && !isBorrow(e); });
-    var due = unpaid.filter(function (e) {
-      return daysBetween(today, e.date) <= 30;
-    }).sort(byDateAsc);
+    // ONE predicate and its NEGATION — not `<= 30` beside `> 30`. Those two are
+    // not complementary when daysBetween() returns NaN, which a date no
+    // calendar has produces: NaN is neither, so the row rendered in NO section
+    // and we were back where we started. `!inWindow` cannot have that hole
+    // whatever daysBetween does.
+    var inWindow = function (e) { return daysBetween(today, e.date) <= 30; };
+    var due = unpaid.filter(inWindow).sort(byDateAsc);
     // Rendered expanded, like every other section. Collapsed-by-default plus a
     // rule about when to auto-open it would be a second source of truth about
     // what she can see, which is the shape that caused this bug's neighbours.
-    var later = unpaid.filter(function (e) {
-      return daysBetween(today, e.date) > 30;
-    }).sort(byDateAsc);
+    var later = unpaid.filter(function (e) { return !inWindow(e); }).sort(byDateAsc);
 
     var lent = expenses.filter(function (e) { return !e.paid && isBorrow(e); })
       .sort(byDateAsc);
@@ -793,7 +795,9 @@
               (r.out ? esc(money0(r.out)) : "–") + "</td>" : "") +
           "</tr>";
         if (!open) return head;
-        // due date ascending within the month — reads like a statement
+        // due date DESCENDING within the month — reads like a statement, and
+        // the scheduled branch below matches. (This said "ascending" while
+        // sorting the other way for four releases.)
         var items = r.items.slice().sort(byDateDesc);
         return head +
           '<tr class="drow"><td colspan="' + cols + '">' +
@@ -1220,7 +1224,13 @@
   // when the server sent no row back, so a response-shape change degrades to
   // the old confirmation instead of printing "undefined" over her ledger.
   function addedMsg(e) {
-    if (!e) return t("added");
+    // Needs a date AND a numeric amount to say anything true. A row missing
+    // either printed "undefined" or ¥0.00 across her ledger — a confirmation
+    // that is wrong is worse than one that is short. The form still clears:
+    // api() rejects unless the server answered ok:true, so the row IS written,
+    // and leaving her fields populated invites the second submit this whole
+    // release exists to prevent.
+    if (!e || !e.date || typeof e.amount !== "number") return t("added");
     return t("added") + " · " + (e.description || categoryLabel(e) || "–") +
       " · " + e.date + " · " + money(e.amount);
   }

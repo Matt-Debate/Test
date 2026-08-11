@@ -2092,15 +2092,40 @@ class ExpenseAddFormTests(ClassAddFormTests):
         "paid": False,
     }}
 
+    OTHER = {"ok": True, "expense": {
+        "id": "aaaa11112222", "date": "2026-12-25", "amount": 47.5,
+        "description": "水电", "category": "utilities", "paid": False,
+    }}
+
     def test_the_confirmation_names_the_row_the_server_stored(self):
         """She added the same ¥1,980 course twice because "已添加" flashed for
         1.7s over a list that did not move. The confirmation has to say what
         landed — and say it from the RESPONSE, so a value the server normalised
-        is confirmed as stored rather than as typed (LESSONS §5)."""
-        toast = self.submit(dict(self.A_ROW), response=self.STORED)["toasts"][0]
-        self.assertIn("football （10月）", toast)
-        self.assertIn("2026-09-30", toast)
-        self.assertIn("1980", toast.replace(",", ""))
+        is confirmed as stored rather than as typed (LESSONS §5).
+
+        Two different responses through the SAME form input: one fixture would
+        be satisfied by an addedMsg that hard-codes the string it expects.
+        """
+        for stored, desc, when, amount in (
+            (self.STORED, "football （10月）", "2026-09-30", "1980"),
+            (self.OTHER, "水电", "2026-12-25", "47.50"),
+        ):
+            with self.subTest(desc):
+                toast = self.submit(dict(self.A_ROW), response=stored)["toasts"][0]
+                self.assertIn(desc, toast)
+                self.assertIn(when, toast)
+                self.assertIn(amount, toast.replace(",", ""))
+
+    def test_an_incomplete_row_confirms_less_rather_than_wrongly(self):
+        """A response missing the date printed the literal "undefined", and one
+        missing the amount printed ¥0.00 — over her ledger. Neither is a
+        confirmation; both are claims about a write nobody made."""
+        for bad in ({"date": None}, {"amount": None}, {"amount": "1980"}):
+            with self.subTest(str(bad)):
+                stored = {"ok": True,
+                          "expense": dict(self.STORED["expense"], **bad)}
+                toast = self.submit(dict(self.A_ROW), response=stored)["toasts"][0]
+                self.assertEqual(toast, "added")
 
     def test_the_confirmation_does_not_echo_the_form(self):
         """The discriminating case: she typed one date and amount, the server
@@ -2146,6 +2171,9 @@ class DueTabVisibilityTests(unittest.TestCase):
 
     PORTAL = Path(__file__).resolve().parent.parent / "app" / "portal.html"
     TODAY = "2026-08-11"
+    A_ROW = {"id": "r", "date": "2026-09-30", "amount": 1980.0,
+             "category": "aden-sports", "description": "a course",
+             "paid": False, "paid_date": None}
 
     def render_now(self, rows: list) -> str:
         """Run the portal's real renderNow() over `rows`; return #nowBody.
@@ -2289,16 +2317,64 @@ console.log(JSON.stringify([_nodes.cards.innerHTML, _nodes.nowBody.innerHTML]));
             })
         return rows
 
-    def test_no_unpaid_row_is_invisible_on_the_due_tab(self):
+    def sections(self, html: str) -> dict:
+        """Split the rendered tab into {section title: [row id, ...]}.
+
+        Membership, not mere presence. "Appears somewhere" cannot tell a
+        partition from an overlap: a `>= 30` boundary slip puts day 30 in BOTH
+        sections and every at-least-once assertion still passes.
+        """
+        import re
+
+        out, current = {}, None
+        for kind, value in re.findall(
+            r'<div class="sec"><h2>([^<]*)</h2>|data-id="([^"]*)"', html
+        ):
+            if kind:
+                current = kind
+                out.setdefault(current, [])
+            elif current is not None:
+                out[current].append(value)
+        return out
+
+    def test_every_unpaid_row_appears_exactly_once_on_the_due_tab(self):
         rows = self.a_sweep()
         html = self.render_now(rows)
-        missing = [r["id"] for r in rows if f'data-id="{r["id"]}"' not in html]
-        self.assertEqual(
-            missing, [],
-            f"{len(missing)} of {len(rows)} unpaid rows render nowhere on the "
-            f"Due tab — she cannot see what she just added. First few: "
-            f"{missing[:5]}",
-        )
+        seen = [i for ids in self.sections(html).values() for i in ids]
+        missing = [r["id"] for r in rows if r["id"] not in seen]
+        twice = sorted({i for i in seen if seen.count(i) > 1})
+        self.assertEqual(missing, [], f"{len(missing)} rows render nowhere: "
+                                      f"{missing[:5]}")
+        self.assertEqual(twice, [], f"{len(twice)} rows render twice: "
+                                    f"{twice[:5]} — the halves overlap")
+
+    def test_the_boundary_lands_in_exactly_one_section(self):
+        """Day 30 belongs to the near half and day 31 to the later half. A
+        `>= 30` slip duplicates day 30; a `< 30` slip drops it."""
+        rows = [
+            dict(self.A_ROW, id="d30", date="2026-09-10"),   # +30
+            dict(self.A_ROW, id="d31", date="2026-09-11"),   # +31
+            dict(self.A_ROW, id="today", date=self.TODAY),   # +0
+            dict(self.A_ROW, id="over", date="2026-08-01"),  # overdue
+        ]
+        got = self.sections(self.render_now(rows))
+        self.assertEqual(got.get("待付 · 未来30天"), ["over", "today", "d30"])
+        self.assertEqual(got.get("待付 · 30天以后"), ["d31"])
+
+    def test_a_date_no_calendar_has_still_reaches_a_section(self):
+        """`daysBetween` returns NaN for these, and NaN is neither <= 30 nor
+        > 30 — so two independent predicates dropped the row entirely, which is
+        the very bug this class exists for. The store now refuses to write one
+        (`_validate_date`), but the renderer must not depend on that: this row
+        can already be in the database from before the check existed."""
+        rows = [
+            dict(self.A_ROW, id="impossible", date="2026-13-01"),
+            dict(self.A_ROW, id="febthirty", date="2026-02-30"),
+            dict(self.A_ROW, id="nodate", date=None),
+        ]
+        seen = [i for ids in self.sections(self.render_now(rows)).values()
+                for i in ids]
+        self.assertEqual(sorted(seen), ["febthirty", "impossible", "nodate"])
 
     def test_the_row_she_actually_added_is_on_the_due_tab(self):
         """The production case, by id and description. 2026-09-30 is 50 days
@@ -2311,16 +2387,27 @@ console.log(JSON.stringify([_nodes.cards.innerHTML, _nodes.nowBody.innerHTML]));
         self.assertIn('data-id="3dc9ed78d440"', html)
         self.assertIn("football", html)
 
-    def test_a_borrow_row_stays_in_its_own_section(self):
-        """P4: money she fronted is never household spending. Surfacing the
-        far-future rows must not sweep borrow into the due list."""
-        html = self.render_now([{
-            "id": "lent1", "date": "2027-01-01", "amount": 500,
-            "category": "borrow", "description": "fronted it",
-            "paid": False, "paid_date": None,
-        }])
-        self.assertIn('data-id="lent1"', html)
-        self.assertIn("st lend", html, "a borrow row lost its lent styling")
+    def test_borrow_lands_in_a_borrow_section_and_nowhere_else(self):
+        """P4: money she fronted is never household spending.
+
+        Asserting only that the row appears, with `st lend` somewhere, was not
+        enough — dropping `!isBorrow` from the unpaid list renders the row in
+        BOTH the due list and 待还我, and every copy carries `st lend` because
+        `stateOf` decides that per row. Membership is what discriminates.
+        """
+        got = self.sections(self.render_now([
+            {"id": "owed", "date": "2027-01-01", "amount": 500,
+             "category": "borrow", "description": "fronted it",
+             "paid": False, "paid_date": None},
+            {"id": "back", "date": "2026-07-30", "amount": 31100,
+             "category": "borrow", "description": "repaid",
+             "paid": True, "paid_date": "2026-08-05"},
+        ]))
+        self.assertEqual(got.get("待还我"), ["owed"])
+        self.assertEqual(got.get("本月已还我"), ["back"])
+        for spending in ("待付 · 未来30天", "待付 · 30天以后", "本月已付"):
+            self.assertEqual(got.get(spending, []), [],
+                             f"a borrow row reached {spending}")
 
 
 class ClassKindParityTests(unittest.TestCase):

@@ -136,6 +136,32 @@ class ValidationTests(unittest.TestCase):
         self.store.create(date="2026-07-14", amount=999_999_999_999)  # still fine
         self.assertTrue(isfinite(self.store.summary(today="2026-07-14")["total"]))
 
+    def test_a_date_no_calendar_has_is_refused(self):
+        """The regex only pinned the SHAPE, so '2026-13-01' was stored happily.
+
+        It is not a tidiness problem. Every consumer that subtracts such a date
+        gets NaN, and the portal's Due tab partitions on a comparison with it —
+        NaN is neither `<= 30` nor `> 30`, so the row rendered in no section at
+        all. That is the defect v0.12.0 was cut to fix, reachable by writing a
+        bad date through the MCP. Found by cross-model review.
+        """
+        for bad in ("2026-13-01", "2026-02-30", "2026-00-10", "2026-01-32"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValidationError):
+                    self.store.create(date=bad, amount=10)
+        self.assertEqual(self.store.list(), [], "an impossible date was stored")
+        # …and the leap-year boundary is not collateral damage
+        self.store.create(date="2028-02-29", amount=10)
+        with self.assertRaises(ValidationError):
+            self.store.create(date="2027-02-29", amount=10)
+
+    def test_paid_date_is_checked_the_same_way(self):
+        """It goes through the same validator and lands in the paid-this-month
+        bucket, so an impossible one is the same NaN hazard one column over."""
+        with self.assertRaises(ValidationError):
+            self.store.create(date="2026-07-14", amount=10,
+                              paid=True, paid_date="2026-02-31")
+
     def test_date_format(self):
         for bad in ("", None, "14/07/2026", "2026-7-4"):
             with self.assertRaises(ValidationError):
