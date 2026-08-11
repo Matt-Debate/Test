@@ -71,6 +71,28 @@ Cut as a **minor** for the same reason 0.11.0 was: it changes what she sees.
   `!inWindow(e)`, which cannot have that hole whatever `daysBetween` returns —
   so the renderer no longer depends on the store's validation being perfect,
   and a bad row already in the database still appears.
+- **`Store.summarize()["total"]` counted borrow** — the only one of these that
+  is not a portal figure, and the one an agent reads. P4 says borrow is
+  excluded from *every* household total; `total` appended the amount before the
+  borrow guard, so live `.ledger_total.total` read **¥347,559** where household
+  spending was **¥316,459**. `expenses_list`'s description points "这个月花了多少"
+  at `.summary`, so the wrong number was one question away. `total` now excludes
+  borrow and `total == paid + unpaid` holds by construction; `count` still
+  counts every row, because a count is not a total. The test named
+  *keeps borrow out of every expense figure* asserted five figures and not that
+  one — it does now, plus a sweep of the invariant over non-dividing amounts.
+- **A repaid loan was labelled 已付** — the same word as an ordinary settled
+  bill, on a row excluded from every 已付 total on the page. `stateOf` checked
+  `paid` before `borrow`, so the fix above made it worse: the row said 已付
+  while the column it sat under no longer contained it. It now reads
+  **已还我 / repaid to me** and keeps the lend styling. This also makes the
+  contract's claim about how those rows are marked true — it was written from
+  the unpaid case and was false for the live repaid one.
+- **The summary card and the section header could differ by a yuan** on the
+  same rows. Both reduced with plain `+` in different orders — the card in API
+  order, the section sorted by `paid_date` — and binary floating point is
+  order-dependent. One `sumAmounts()` now sums smallest-first for both, so the
+  result depends on the set alone. Same reason `Store.summarize` uses `fsum`.
 - **History counted a repayment as household spending** — the third tab this
   had to be said on, and the one this release had not audited. Its 已付/未付
   columns summed every row with no borrow guard, so **2026-07 read ¥61,300 已付

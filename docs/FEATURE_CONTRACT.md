@@ -204,8 +204,9 @@ The nav order is Due · Classes · History · Stats.
   sit in their own group below, and since v0.12.0 carry the same `aria-expanded`
   and open state as a past month — the two branches had drifted. **Both money
   columns exclude borrow** (P4), so they agree with the Due tab and the Stats
-  KPI; the borrow rows are still listed inside the expanded month, marked
-  待还我. `txns` counts every row, borrow included — it is a count, not a total.
+  KPI; the borrow rows are still listed inside the expanded month — an
+  outstanding one marked 我垫付, a repaid one 已还我 (since v0.12.0; it read
+  已付 before, the same word as a bill it is not counted with). `txns` counts every row, borrow included — it is a count, not a total.
 - **Classes** — prepaid courses. A per-class pack shows classes and money
   remaining; a monthly/semester fee shows what is owed back, split into
   reclaimable and forfeited. Tap a course for its class log. Its payload is

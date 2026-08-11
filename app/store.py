@@ -620,6 +620,9 @@ class Store:
         list makes that disagreement unrepresentable.
 
         Buckets (see also BORROW_CATEGORY):
+          total     household spending, paid or not — EXCLUDES borrow, so
+                    `total == paid + unpaid` always. `count` is a row count and
+                    does include borrow rows; a count is not a total
           due_now   unpaid expense, due on or before today (includes overdue)
           upcoming  unpaid expense, due within the next UPCOMING_WINDOW_DAYS —
                     a window, not "everything future": recurring costs are
@@ -643,7 +646,6 @@ class Store:
                                  "upcoming_count", "borrow_owed_count")}
         for e in expenses:
             amount = float(e.amount or 0)
-            buckets["total"].append(amount)
             if (e.category or "") == BORROW_CATEGORY:
                 if e.paid:
                     buckets["borrow_repaid"].append(amount)
@@ -651,6 +653,13 @@ class Store:
                     buckets["borrow_owed"].append(amount)
                     counts["borrow_owed_count"] += 1
                 continue
+            # after the borrow guard, never before it: `total` is a HOUSEHOLD
+            # total like every other figure here (P4), and counting the loan
+            # made it gross ledger flow under a name that reads as spending.
+            # An agent asked "这个月花了多少" is pointed at .summary, so the
+            # live ¥347,559 answer carried ¥31,100 that was never spending.
+            # total == paid + unpaid now holds by construction.
+            buckets["total"].append(amount)
             if e.paid:
                 buckets["paid"].append(amount)
                 continue

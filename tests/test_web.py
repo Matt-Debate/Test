@@ -2352,6 +2352,11 @@ console.log(JSON.stringify([_nodes.cards.innerHTML, _nodes.nowBody.innerHTML]));
         {"id": "oldlent", "date": "2026-06-01", "amount": 777.0,
          "category": "borrow", "description": "Repaid in July",
          "paid": True, "paid_date": "2026-07-20"},
+        # a SECOND repayment this month, so 本月已还我's comparator is
+        # observable — with one row any sort passes
+        {"id": "office2", "date": "2026-06-15", "amount": 640.0,
+         "category": "borrow", "description": "Repaid later this month",
+         "paid": True, "paid_date": "2026-08-09"},
     ]
 
     def paid_figures(self) -> tuple:
@@ -2391,7 +2396,8 @@ console.log(JSON.stringify([_nodes.cards.innerHTML, _nodes.nowBody.innerHTML]));
         an empty 本月已还我.
         """
         _, _, body = self.paid_figures()
-        self.assertEqual(self.sections(body).get("本月已还我"), ["office"])
+        # paid_date descending: office2 on 08-09 before office on 08-05
+        self.assertEqual(self.sections(body).get("本月已还我"), ["office2", "office"])
 
     def test_only_this_months_payments_count_as_this_month(self):
         """Both sections say 本月. Neither filter is exercised by a fixture
@@ -2401,7 +2407,41 @@ console.log(JSON.stringify([_nodes.cards.innerHTML, _nodes.nowBody.innerHTML]));
         _, _, body = self.paid_figures()
         got = self.sections(body)
         self.assertEqual(got.get("本月已付"), ["net", "rent"])
-        self.assertEqual(got.get("本月已还我"), ["office"])
+        self.assertEqual(got.get("本月已还我"), ["office2", "office"])
+
+    def test_the_card_and_the_section_agree_at_extreme_amounts(self):
+        """Both reduce the SAME rows in DIFFERENT orders — the card in API
+        order, the section sorted by paid_date — and plain `+` is
+        order-dependent in binary floating point. With accepted amounts these
+        two headline figures formatted a whole yuan apart while describing one
+        set. Amounts are the store's ceiling and two sub-cent values, which is
+        the shape that separates them (LESSONS §10)."""
+        rows = [
+            {"id": "big", "date": "2026-08-01", "amount": 999999999999.0,
+             "category": "living", "description": "big",
+             "paid": True, "paid_date": "2026-08-01"},
+            {"id": "mid", "date": "2026-08-02", "amount": 0.499938,
+             "category": "living", "description": "mid",
+             "paid": True, "paid_date": "2026-08-09"},
+            {"id": "tiny", "date": "2026-08-03", "amount": 0.000001,
+             "category": "living", "description": "tiny",
+             "paid": True, "paid_date": "2026-08-05"},
+        ]
+        cards, body = self.render_cards_and_now(rows, {
+            "due_now": 0, "due_now_count": 0, "upcoming": 0,
+            "upcoming_count": 0, "borrow_owed": 0, "borrow_owed_count": 0,
+        })
+        import re
+
+        card = re.search(r'本月已付</div><div class="v">([^<]+)', cards).group(1)
+        sec = re.search(r'本月已付</h2><span class="tot">([^<]+)', body).group(1)
+        self.assertEqual(card, sec)
+
+    def test_repayments_are_listed_newest_first(self):
+        """本月已还我 sorts by paid_date descending too. Its fixture had one
+        row until now, so any comparator passed."""
+        _, _, body = self.paid_figures()
+        self.assertEqual(self.sections(body).get("本月已还我"), ["office2", "office"])
 
     def test_payments_are_listed_newest_first(self):
         """Both lists sort by paid_date descending. With one row each the
@@ -2466,7 +2506,66 @@ console.log(JSON.stringify(_nodes.historyBody.innerHTML));
         {"id": "owed", "date": "2026-07-20", "amount": 500.0,
          "category": "borrow", "description": "still owed to me",
          "paid": False, "paid_date": None},
+        # an ORDINARY unpaid row, so the 未付 column is exercised at all —
+        # without one, deleting History's outstanding accumulator entirely
+        # leaves the suite green and every 未付 figure blank
+        {"id": "owing", "date": "2026-07-25", "amount": 1234.56,
+         "category": "utilities", "description": "unpaid utilities",
+         "paid": False, "paid_date": None},
+        # a SECOND current-month repayment, so 本月已还我's sort is observable
+        {"id": "back2", "date": "2026-07-10", "amount": 60.0,
+         "category": "borrow", "description": "repaid earlier",
+         "paid": True, "paid_date": "2026-08-02"},
     ]
+
+    def state_of(self, row: dict) -> dict:
+        """The portal's own stateOf — the label under every row, everywhere."""
+        import json
+
+        src = self.PORTAL.read_text(encoding="utf-8")
+        block = src[src.index("  var CATS = ["):src.index("  // ---- tab 3: stats ----")]
+        self.assertIn("function stateOf", block, "block markers moved")
+        script = f"""
+var _nodes = {{}}, localStorage = {{getItem: function () {{ return "zh"; }}}};
+var document = {{
+  getElementById: function (id) {{
+    if (!_nodes[id]) _nodes[id] = {{innerHTML: "", addEventListener: function () {{}}}};
+    return _nodes[id];
+  }},
+  addEventListener: function () {{}},
+}};
+{block}
+serverToday = {json.dumps(self.TODAY)};
+serverTodayAt = Date.now();
+serverMidnightIn = 43200;
+console.log(JSON.stringify(stateOf({json.dumps(row)})));
+"""
+        out = subprocess.run(["node", "-e", script], capture_output=True,
+                             text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_a_repaid_loan_is_not_labelled_paid(self):
+        """It fell into the `paid` branch and read 已付 — the same word as an
+        ordinary settled bill — while being excluded from every 已付 total on
+        the page. A row labelled with a figure it is not counted in is the
+        shown-vs-counted mismatch of LESSONS §5, and the docs claimed it read
+        待还我, which was false for exactly this row."""
+        repaid = self.state_of({"category": "borrow", "paid": True,
+                                "paid_date": "2026-08-05", "date": "2026-07-30"})
+        self.assertEqual(repaid["cls"], "lend")
+        self.assertIn("已还我", repaid["text"])
+        self.assertNotIn("已付", repaid["text"])
+        # …and the two borrow states stay distinguishable from each other
+        owed = self.state_of({"category": "borrow", "paid": False,
+                              "date": "2027-01-01"})
+        self.assertEqual(owed["cls"], "lend")
+        self.assertIn("我垫付", owed["text"])
+        # an ordinary settled bill is untouched
+        bill = self.state_of({"category": "living", "paid": True,
+                              "paid_date": "2026-08-05", "date": "2026-07-30"})
+        self.assertEqual(bill["cls"], "paid")
+        self.assertIn("已付", bill["text"])
 
     def test_history_month_totals_exclude_what_she_fronted(self):
         """P4 — the third tab this had to be said on. July read ¥61,300 已付
@@ -2477,9 +2576,12 @@ console.log(JSON.stringify(_nodes.historyBody.innerHTML));
         july = [m for m in months if m[0] == "2026-07"]
         self.assertEqual(len(july), 1, months)
         _, txns, paid, outstanding = july[0]
+        # ¥28,000 + ¥2,200 — NOT the ¥31,100 repayment on top
         self.assertEqual(paid, "¥30,200")
-        self.assertIn(outstanding, ("", "–"), "money owed TO her read as owed BY her")
-        self.assertEqual(txns, "4", "a borrow row stopped being a transaction")
+        # the ordinary unpaid row only. The ¥500 owed TO her must not appear in
+        # a column meaning money she owes.
+        self.assertEqual(outstanding, "¥1,235")
+        self.assertEqual(txns, "6", "a borrow row stopped being a transaction")
 
     def test_a_borrow_row_is_still_listed_in_its_month(self):
         """Excluded from the total, not from the statement — otherwise this is
@@ -2495,21 +2597,108 @@ console.log(JSON.stringify(_nodes.historyBody.innerHTML));
                 self.assertIn(f'data-id="{row_id}"', html)
         self.assertIn("st lend", html, "the borrow rows lost their 待还我 marking")
 
+    def render_stats_months(self, rows: list) -> dict:
+        """{month: spend} from the portal's OWN Stats bucketing.
+
+        Executes `spendRows()` and the same `(e.date||"").slice(0,7)` grouping
+        renderStats uses. Restating that rule in Python instead — which is what
+        this started as — tests the restatement: dropping `!isBorrow` from
+        `spendRows`, or switching its bucket from `date` to `paid_date`, left
+        every assertion green while Stats showed different money from History.
+        """
+        import json
+
+        src = self.PORTAL.read_text(encoding="utf-8")
+        block = src[src.index("  var CATS = ["):src.index("  function barsSvg(series)")]
+        for marker in ("function spendRows", "function lastMonths"):
+            self.assertIn(marker, block, "block markers moved")
+        stats = src[src.index("  function renderStats() {"):
+                    src.index("  // ---- what I've fronted")]
+        self.assertIn("byMonth", stats, "renderStats no longer buckets by month")
+        # the exact grouping expression renderStats uses, lifted from it rather
+        # than retyped — if it changes there and not here, the slice fails
+        group = 'var m = (e.date || "").slice(0, 7);'
+        self.assertIn(group, stats, "renderStats changed how it buckets")
+        script = f"""
+var _nodes = {{}}, localStorage = {{getItem: function () {{ return "zh"; }}}};
+var document = {{
+  getElementById: function (id) {{
+    if (!_nodes[id]) _nodes[id] = {{innerHTML: "", addEventListener: function () {{}}}};
+    return _nodes[id];
+  }},
+  addEventListener: function () {{}},
+}};
+{block}
+expenses = {json.dumps(rows)};
+serverToday = {json.dumps(self.TODAY)};
+serverTodayAt = Date.now();
+serverMidnightIn = 43200;
+var byMonth = {{}};
+spendRows().forEach(function (e) {{
+  {group}
+  byMonth[m] = (byMonth[m] || 0) + Number(e.amount || 0);
+}});
+console.log(JSON.stringify(byMonth));
+"""
+        out = subprocess.run(["node", "-e", script], capture_output=True,
+                             text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_a_scheduled_month_announces_itself_like_a_past_one(self):
+        """The two branches drifted: the future one had no `aria-expanded` and
+        no `open` class, so a screen reader heard a plain row and the caret
+        never rotated. Nothing asserted this release's alignment of them."""
+        import re
+
+        rows = [dict(self.A_ROW, id="future", date="2027-03-01")]
+        _, shut = self.render_history(rows)
+        _, open_ = self.render_history(rows, open_months=["2027-03"])
+        shut_row = re.search(r'<tr class="mrow soon[^>]*>', shut).group(0)
+        open_row = re.search(r'<tr class="mrow soon[^>]*>', open_).group(0)
+        self.assertIn('aria-expanded="false"', shut_row)
+        self.assertNotIn(" open", shut_row)
+        self.assertIn('aria-expanded="true"', open_row)
+        self.assertIn("mrow soon open", open_row)
+        # …and expanding it actually reveals the row
+        self.assertNotIn('data-id="future"', shut)
+        self.assertIn('data-id="future"', open_)
+
+    def test_an_expanded_month_lists_its_items_newest_first(self):
+        """Both branches share byDateDesc now. The detail sort was extracted
+        this release and no test read the resulting order."""
+        rows = [
+            dict(self.A_ROW, id="early", date="2027-03-02"),
+            dict(self.A_ROW, id="late", date="2027-03-20"),
+            dict(self.A_ROW, id="mid", date="2027-03-11"),
+        ]
+        _, html = self.render_history(rows, open_months=["2027-03"])
+        import re
+
+        self.assertEqual(re.findall(r'data-id="([^"]*)"', html),
+                         ["late", "mid", "early"])
+
     def test_history_and_stats_agree_month_by_month(self):
         """The comment above renderStats claims they agree. It was false for
-        four releases; this is what makes it a checked claim instead of a
-        sentence (LESSONS §9)."""
+        four releases by the whole repayment; this makes it a checked claim
+        instead of a sentence (LESSONS §9).
+
+        Both sides come from the portal now — History's rendered 已付 column
+        against Stats' own `spendRows()` — so neither is graded by my
+        restatement of what it ought to do.
+        """
         months, _ = self.render_history(self.A_BORROW_MONTH)
-        spent = {m[0]: m[2] for m in months}
-        # Stats' own rule, computed here independently: paid, non-borrow, by
-        # DUE month — the same buckets History now uses
-        want = {}
-        for e in self.A_BORROW_MONTH:
-            if e["paid"] and e["category"] != "borrow":
-                key = e["date"][:7]
-                want[key] = want.get(key, 0) + e["amount"]
-        for key, total in want.items():
-            self.assertEqual(spent.get(key), f"¥{total:,.0f}")
+        history = {m[0]: m[2] for m in months}
+        stats = self.render_stats_months(self.A_BORROW_MONTH)
+        self.assertTrue(stats, "Stats bucketed nothing — the fixture proves nothing")
+        for month, spend in stats.items():
+            with self.subTest(month):
+                self.assertEqual(history.get(month), f"¥{spend:,.0f}")
+        # and no month has spending in History that Stats does not see
+        for month, shown in history.items():
+            if shown not in ("¥0", "", "–"):
+                self.assertIn(month, stats, f"History shows {shown} in {month}, "
+                                            "Stats shows nothing")
 
     def a_sweep(self) -> list:
         """One unpaid row per day-offset across a 460-day span.
@@ -2671,6 +2860,36 @@ console.log(JSON.stringify(_nodes.historyBody.innerHTML));
         for spending in ("待付 · 未来30天", "待付 · 30天以后", "本月已付"):
             self.assertEqual(got.get(spending, []), [],
                              f"a borrow row reached {spending}")
+
+
+class ToastLegibilityTests(unittest.TestCase):
+    """A SOURCE-TEXT check, deliberately, and the docstring says so.
+
+    The node harnesses execute the portal's JS against stub nodes whose
+    `innerHTML` is a plain string — no DOM, no stylesheet. CSS is therefore
+    invisible to every other test in this file, and this release's confirmation
+    depends on it: the message grew from "已添加" to a description, a date and
+    an amount, and the toast is centred by `translateX(-50%)` with no width of
+    its own. Without the bound it runs off both edges of a phone and the
+    confirmation she is meant to read is unreadable — with every test green.
+    This is the wiring-check exemption in LESSONS §8, not a substitute for
+    executing the code.
+    """
+
+    PORTAL = Path(__file__).resolve().parent.parent / "app" / "portal.html"
+
+    def setUp(self):
+        src = self.PORTAL.read_text(encoding="utf-8")
+        start = src.index("  .toast {")
+        self.rule = src[start:src.index("}", start)]
+
+    def test_the_toast_cannot_run_off_a_narrow_phone(self):
+        self.assertIn("max-width", self.rule)
+        self.assertIn("92vw", self.rule)
+
+    def test_a_long_confirmation_wraps_rather_than_overflowing(self):
+        """A CJK description with no spaces has nowhere to break by default."""
+        self.assertIn("overflow-wrap:anywhere", self.rule)
 
 
 class ClassKindParityTests(unittest.TestCase):

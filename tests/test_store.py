@@ -99,6 +99,29 @@ class CreateAndReadTests(unittest.TestCase):
         self.assertEqual(s["due_now"], 0.0)
         self.assertEqual(s["borrow_owed"], 800.0)
         self.assertEqual(s["borrow_repaid"], 500.0)
+        # "every figure" has to include `total`, and for four releases it did
+        # not: this read 1600 — the ¥300 actually spent plus ¥1,300 of loan —
+        # under the one key an agent asked "how much did we spend" reaches for.
+        self.assertEqual(s["total"], 300.0)
+        # …and `count` is deliberately different: a row count, not a total
+        self.assertEqual(s["count"], 3)
+
+    def test_total_is_always_paid_plus_unpaid(self):
+        """The invariant that makes the bucket unambiguous, swept rather than
+        asserted at one point (LESSONS §10). Amounts are primes and thirds so
+        no coincidence of round numbers can carry it."""
+        from itertools import product
+
+        for i, (amount, category, paid) in enumerate(product(
+            (7.77, 13.13, 1039.31), ("living", "borrow", None), (True, False),
+        )):
+            self.store.create(
+                date="2026-07-%02d" % (i + 1), amount=amount, category=category,
+                paid=paid, paid_date="2026-07-05" if paid else None,
+            )
+            s = self.store.summary(today="2026-07-31")
+            self.assertEqual(s["total"], round(s["paid"] + s["unpaid"], 2),
+                             f"after {i + 1} rows")
 
     def test_summary_counts_uncategorised_rows(self):
         """`category <> 'borrow'` is NULL for a NULL category — a naive filter
@@ -161,8 +184,16 @@ class ValidationTests(unittest.TestCase):
             self.store.create(date="2027-02-29", amount=10)
 
     def test_paid_date_is_checked_the_same_way(self):
-        """It goes through the same validator and lands in the paid-this-month
-        bucket, so an impossible one is the same NaN hazard one column over."""
+        """It goes through the same validator, and it decides which month a
+        payment counts in.
+
+        NOT the NaN hazard — this docstring said so and was wrong. The
+        paid-this-month code only slices `"2026-02"` off the front, so an
+        impossible day never reaches arithmetic here. It is the quieter
+        failure: `2026-02-31` is a payment filed under a day that does not
+        exist, and if the month ever rolled (`2026-12-32`) it would land in the
+        wrong month's 本月已付 with nothing to show for it.
+        """
         with self.assertRaises(ValidationError):
             self.store.create(date="2026-07-14", amount=10,
                               paid=True, paid_date="2026-02-31")

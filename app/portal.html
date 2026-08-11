@@ -333,6 +333,7 @@
       mark_paid:"✓ 标记已付", unmark:"取消已付", edit:"编辑", del:"删除", hist:"记录",
       save:"保存", cancel:"取消", paid_on:"付款日期", confirm_del:"确定删除这条？",
       st_due:"已到期", st_soon:"未到期", st_paid:"已付", st_lent:"我垫付",
+      st_repaid:"已还我",
       overdue_by:"逾期", days:"天", today:"今天", tomorrow:"明天",
       scheduled:"已排期",
       month:"月份", txns:"笔数", spent:"已付", outstanding:"未付",
@@ -377,6 +378,7 @@
       mark_paid:"✓ Mark paid", unmark:"Unmark paid", edit:"Edit", del:"Delete", hist:"History",
       save:"Save", cancel:"Cancel", paid_on:"Paid on", confirm_del:"Delete this entry?",
       st_due:"due", st_soon:"upcoming", st_paid:"paid", st_lent:"I lent",
+      st_repaid:"repaid to me",
       overdue_by:"overdue", days:"d", today:"today", tomorrow:"tomorrow",
       scheduled:"Scheduled",
       month:"Month", txns:"Txns", spent:"Paid", outstanding:"Outstanding",
@@ -489,6 +491,18 @@
   // implementation-defined. Two rows dated 2026-09-30 are exactly that case.
   function byDateAsc(a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; }
   function byDateDesc(a, b) { return byDateAsc(b, a); }
+  // The ONE way this page adds money up. Plain `+` is order-dependent in binary
+  // floating point, and the summary card and the section header below it reduce
+  // the SAME rows in different orders — the card in API order, the section
+  // sorted by paid_date — so at accepted-but-extreme amounts the two headline
+  // figures could differ by a yuan while describing one set. Summing smallest
+  // first makes the result depend on the set alone, which is the same reason
+  // Store.summarize uses fsum rather than `+=`.
+  function sumAmounts(rows) {
+    return rows.map(function (e) { return Number(e.amount || 0); })
+      .sort(function (a, b) { return a - b; })
+      .reduce(function (a, n) { return a + n; }, 0);
+  }
 
   // `ms` is optional: a confirmation that names what was written needs longer
   // on screen than "已保存". Shortening the message to fit the old 1.7s would
@@ -612,13 +626,14 @@
     var s = summary || {};
     var paidMonth = expenses.filter(function (e) {
       return e.paid && !isBorrow(e) && (e.paid_date || "").slice(0,7) === todayStr().slice(0,7);
-    }).reduce(function (a, e) { return a + Number(e.amount || 0); }, 0);
+    });
+    var paidMonthTotal = sumAmounts(paidMonth);
     var html =
       '<div class="card due"><div class="k"><span class="dot due"></span>' + esc(t("due_now")) + '</div>' +
         '<div class="v">' + esc(money0(s.due_now)) + '</div>' +
         '<div class="n">' + esc(String(s.due_now_count || 0)) + '</div></div>' +
       '<div class="card"><div class="k"><span class="dot ok"></span>' + esc(t("paid_month")) + '</div>' +
-        '<div class="v">' + esc(money0(paidMonth)) + '</div>' +
+        '<div class="v">' + esc(money0(paidMonthTotal)) + '</div>' +
         '<div class="n">&nbsp;</div></div>';
     if (s.upcoming_count) {
       html += '<div class="card"><div class="k"><span class="dot soon"></span>' + esc(t("upcoming")) + '</div>' +
@@ -638,8 +653,18 @@
   // Returns {cls, text} rather than markup so the caller escapes once, at the
   // point of interpolation.
   function stateOf(e) {
+    // borrow BEFORE paid, and a repaid loan gets its OWN word. It used to fall
+    // into the paid branch and read 已付 — identical to an ordinary settled
+    // bill — while being excluded from every 已付 total on the page. A row
+    // labelled with a figure it is not counted in is the shown-vs-counted
+    // mismatch of LESSONS §5, and it now says 已还我, which is what the
+    // section it sits in is called.
+    if (isBorrow(e)) {
+      return e.paid
+        ? { cls:"lend", text:t("st_repaid") + (e.paid_date ? " " + e.paid_date : "") }
+        : { cls:"lend", text:t("st_lent") + " " + e.date };
+    }
     if (e.paid) return { cls:"paid", text:t("st_paid") + (e.paid_date ? " " + e.paid_date : "") };
-    if (isBorrow(e)) return { cls:"lend", text:t("st_lent") + " " + e.date };
     var d = daysBetween(todayStr(), e.date);
     if (d < 0) return { cls:"due", text:t("overdue_by") + " " + (-d) + t("days") };
     if (d === 0) return { cls:"due", text:t("today") };
@@ -682,7 +707,7 @@
   }
 
   function section(titleKey, rows, emptyKey) {
-    var total = rows.reduce(function (a, e) { return a + Number(e.amount || 0); }, 0);
+    var total = sumAmounts(rows);
     return '<div class="sec"><h2>' + esc(t(titleKey)) + "</h2>" +
       (rows.length ? '<span class="tot">' + esc(money0(total)) + "</span>" : "") + "</div>" +
       (rows.length ? listHtml(rows)
