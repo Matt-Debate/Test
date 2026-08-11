@@ -57,17 +57,20 @@ Cut as a **minor** for the same reason 0.11.0 was: it changes what she sees.
   portal-side sums.
 - **A date no calendar has is now refused.** `_validate_date` checked only the
   *shape* (`^\d{4}-\d{2}-\d{2}$`), so `2026-13-01` and `2026-02-30` were
-  accepted and stored. Not a tidiness problem: every consumer that subtracts
-  such a date gets `NaN`, and the Due tab partitions on a comparison with it —
-  `NaN` is neither `<= 30` nor `> 30`, so the row rendered in **no section at
-  all**. The same defect this release was cut to fix, reachable by writing a bad
-  date through the MCP. Leap years still work (2028-02-29 in, 2027-02-29 out).
+  accepted and stored through the MCP. The two then fail **differently**, which
+  is why both are refused at the write rather than handled downstream:
+  `2026-13-01` makes `Date.parse` return `NaN`, and `NaN` is neither `<= 30`
+  nor `> 30`, so the Due tab rendered it in **no section at all** — this
+  release's own defect; `2026-02-30` normalises silently to early March and
+  renders, sorts and totals as a row due on a day she never entered, which no
+  renderer can detect. Leap years still work (2028-02-29 in, 2027-02-29 out),
+  and the same validator covers `paid_date`, `since`/`until` and class events.
 - **The Due partition is a complement, not a second predicate.** `later` was
   `> 30`, which only *looks* like the negation of `<= 30`; the two are not
-  complementary once `NaN` is possible. It is now `!inWindow(e)`, which cannot
-  have that hole whatever `daysBetween` returns — the renderer no longer
-  depends on the store's validation being perfect, and a bad row already in the
-  database still renders.
+  complementary whenever the comparison is not a number. It is now
+  `!inWindow(e)`, which cannot have that hole whatever `daysBetween` returns —
+  so the renderer no longer depends on the store's validation being perfect,
+  and a bad row already in the database still appears.
 - **A scheduled month in History announced itself wrongly.** The future branch
   of `renderHistory` was written separately from the past branch and drifted: no
   `aria-expanded`, no `open` class, so a screen reader heard a plain row and the

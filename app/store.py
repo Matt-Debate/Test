@@ -310,11 +310,15 @@ class Store:
                 "omit the field to default to today"
             )
         # The regex only pins the SHAPE. '2026-13-01' and '2026-02-30' matched
-        # it and were stored, and a date no calendar has is not merely untidy:
-        # every consumer that subtracts it gets NaN. The portal's Due tab
-        # partitions on `daysBetween(...) <= 30`, and NaN is neither <= 30 nor
-        # > 30 — the row rendered in no section at all, which is exactly the
-        # defect v0.12.0 was cut to fix, reachable through the MCP.
+        # it and were stored, and a date no calendar has is not merely untidy —
+        # though the two fail differently downstream, which is why BOTH have to
+        # be refused here rather than handled in the portal:
+        #   '2026-13-01' → Date.parse gives NaN, and NaN is neither <= 30 nor
+        #     > 30, so the Due tab's two halves both rejected it and the row
+        #     rendered in no section at all (v0.12.0's own defect, via MCP);
+        #   '2026-02-30' → normalises silently to early March, so it renders,
+        #     sorts and totals as a row due on a day she never entered. No
+        #     renderer can detect that; only refusing the write can.
         # strptime is deliberately paired with the regex rather than replacing
         # it: it would otherwise accept unpadded '2026-8-1'.
         try:

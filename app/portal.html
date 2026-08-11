@@ -699,11 +699,14 @@
     // Partitioning a single list means no row can fall between the halves the
     // way it fell off the end of the old one.
     var unpaid = expenses.filter(function (e) { return !e.paid && !isBorrow(e); });
-    // ONE predicate and its NEGATION — not `<= 30` beside `> 30`. Those two are
-    // not complementary when daysBetween() returns NaN, which a date no
-    // calendar has produces: NaN is neither, so the row rendered in NO section
-    // and we were back where we started. `!inWindow` cannot have that hole
-    // whatever daysBetween does.
+    // ONE predicate and its NEGATION — not `<= 30` beside `> 30`. Those two
+    // are not complementary whenever the comparison is not a number: `NaN` is
+    // neither, so such a row rendered in NO section and we were back where we
+    // started. Verified under node: '2026-13-01', '2026-00-10', '2026-01-32'
+    // and a null/missing date all give `Date.parse` NaN. ('2026-02-30' does
+    // NOT — it normalises silently to early March and sorts as an ordinary
+    // row. Only the store can catch that one.) `!inWindow` has no such hole
+    // whatever the comparison returns.
     var inWindow = function (e) { return daysBetween(today, e.date) <= 30; };
     var due = unpaid.filter(inWindow).sort(byDateAsc);
     // Rendered expanded, like every other section. Collapsed-by-default plus a

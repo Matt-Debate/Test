@@ -139,11 +139,16 @@ class ValidationTests(unittest.TestCase):
     def test_a_date_no_calendar_has_is_refused(self):
         """The regex only pinned the SHAPE, so '2026-13-01' was stored happily.
 
-        It is not a tidiness problem. Every consumer that subtracts such a date
-        gets NaN, and the portal's Due tab partitions on a comparison with it —
-        NaN is neither `<= 30` nor `> 30`, so the row rendered in no section at
-        all. That is the defect v0.12.0 was cut to fix, reachable by writing a
-        bad date through the MCP. Found by cross-model review.
+        It is not a tidiness problem, and the two cases fail differently —
+        which is why both must be refused here rather than handled downstream.
+        '2026-13-01' makes `Date.parse` return NaN, and NaN is neither `<= 30`
+        nor `> 30`, so the portal's Due tab rendered it in no section at all —
+        v0.12.0's own defect, reachable by writing a bad date through the MCP.
+        '2026-02-30' is worse in a quieter way: it normalises to early March
+        and renders, sorts and totals as a row due on a day she never entered.
+        No renderer can detect the second; only refusing the write can.
+
+        Found by cross-model review.
         """
         for bad in ("2026-13-01", "2026-02-30", "2026-00-10", "2026-01-32"):
             with self.subTest(bad=bad):

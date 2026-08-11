@@ -235,13 +235,21 @@ list rather than filtering with a predicate and dropping the remainder; the
 complement then cannot be forgotten.
 
 **Write the second half as the NEGATION, not as a second predicate.** The first
-fix used `<= 30` and `> 30`, which only *look* complementary: `daysBetween`
-returns `NaN` for a date no calendar has, and `NaN` satisfies neither — so the
+fix used `<= 30` and `> 30`, which only *look* complementary: the comparison is
+`NaN` for a date `Date.parse` cannot read, and `NaN` satisfies neither — so the
 row was invisible again, by the same mechanism, in the code written to fix it.
 `!inWindow(e)` has no such hole whatever the comparison does. A cross-model
-review found this; three of my own passes did not. The store now rejects those
-dates too, but the renderer must not *depend* on that: rows written before a
-check existed are still in the database.
+review found this; my own passes did not. The store now rejects those dates
+too, but the renderer must not *depend* on that: rows written before a check
+existed are still in the database.
+
+**Then the explanation of that fix was itself wrong**, in five places, and the
+next review round caught it: not every impossible date gives `NaN`.
+`2026-13-01` does; `2026-02-30` silently normalises to early March and renders,
+sorts and totals as a row due on a day nobody entered. The fix was right and
+the reason written beside it was not — §9 again, in a comment written *while
+fixing a bug about unverified claims*. Run the probe before you describe the
+behaviour, even when the code already works.
 
 **And test membership, not presence.** "Every row appears somewhere" cannot
 tell a partition from an overlap — a `>=` slip puts the boundary row in both

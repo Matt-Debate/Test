@@ -2337,16 +2337,41 @@ console.log(JSON.stringify([_nodes.cards.innerHTML, _nodes.nowBody.innerHTML]));
                 out[current].append(value)
         return out
 
-    def test_every_unpaid_row_appears_exactly_once_on_the_due_tab(self):
+    NEAR, LATER = "待付 · 未来30天", "待付 · 30天以后"
+
+    def test_every_unpaid_row_lands_in_the_right_section(self):
+        """Exact membership for all 460 offsets, not "appears exactly once".
+
+        Presence-plus-uniqueness still passes when a row is in the WRONG half:
+        classify day +5 as later and the sweep, the boundary case, the
+        malformed-date case and the borrow case are all still satisfied. The
+        expectation is derived here in Python, from the dates alone, so it is
+        not the renderer's own arithmetic grading itself.
+        """
+        from datetime import datetime
+
         rows = self.a_sweep()
-        html = self.render_now(rows)
-        seen = [i for ids in self.sections(html).values() for i in ids]
-        missing = [r["id"] for r in rows if r["id"] not in seen]
-        twice = sorted({i for i in seen if seen.count(i) > 1})
-        self.assertEqual(missing, [], f"{len(missing)} rows render nowhere: "
-                                      f"{missing[:5]}")
-        self.assertEqual(twice, [], f"{len(twice)} rows render twice: "
-                                    f"{twice[:5]} — the halves overlap")
+        today = datetime.strptime(self.TODAY, "%Y-%m-%d")
+        expected = {self.NEAR: [], self.LATER: []}
+        for r in rows:
+            days = (datetime.strptime(r["date"], "%Y-%m-%d") - today).days
+            expected[self.NEAR if days <= 30 else self.LATER].append(r["id"])
+
+        got = self.sections(self.render_now(rows))
+        # the sweep is generated in ascending date order and both sections sort
+        # byDateAsc, so comparing lists pins the ORDER too
+        for name in (self.NEAR, self.LATER):
+            with self.subTest(name):
+                actual = got.get(name, [])
+                self.assertEqual(
+                    actual, expected[name],
+                    f"{name}: {len(set(expected[name]) - set(actual))} missing, "
+                    f"{len(set(actual) - set(expected[name]))} that belong to "
+                    f"the other half",
+                )
+        # nothing reached a third section, and nothing was rendered twice
+        seen = [i for ids in got.values() for i in ids]
+        self.assertEqual(sorted(seen), sorted(r["id"] for r in rows))
 
     def test_the_boundary_lands_in_exactly_one_section(self):
         """Day 30 belongs to the near half and day 31 to the later half. A
@@ -2358,23 +2383,37 @@ console.log(JSON.stringify([_nodes.cards.innerHTML, _nodes.nowBody.innerHTML]));
             dict(self.A_ROW, id="over", date="2026-08-01"),  # overdue
         ]
         got = self.sections(self.render_now(rows))
-        self.assertEqual(got.get("待付 · 未来30天"), ["over", "today", "d30"])
-        self.assertEqual(got.get("待付 · 30天以后"), ["d31"])
+        self.assertEqual(got.get(self.NEAR), ["over", "today", "d30"])
+        self.assertEqual(got.get(self.LATER), ["d31"])
 
     def test_a_date_no_calendar_has_still_reaches_a_section(self):
-        """`daysBetween` returns NaN for these, and NaN is neither <= 30 nor
-        > 30 — so two independent predicates dropped the row entirely, which is
-        the very bug this class exists for. The store now refuses to write one
-        (`_validate_date`), but the renderer must not depend on that: this row
-        can already be in the database from before the check existed."""
+        """A date the store would now refuse must still RENDER somewhere, since
+        rows written before that check exist in the database.
+
+        These do not all fail the same way, which is the point of testing the
+        set rather than one example: `2026-13-01`, `2026-00-10`, `2026-01-32`
+        and a missing date give `Date.parse` NaN, and NaN is neither `<= 30`
+        nor `> 30` — two independent predicates dropped those rows entirely.
+        `2026-02-30` does NOT: it silently normalises to early March and sorts
+        as an ordinary near-term row. Deriving the second half as `!inWindow`
+        covers the first group; nothing can rescue the second, which is why the
+        store refuses to write it.
+        """
         rows = [
-            dict(self.A_ROW, id="impossible", date="2026-13-01"),
+            dict(self.A_ROW, id="month13", date="2026-13-01"),
+            dict(self.A_ROW, id="month00", date="2026-00-10"),
+            dict(self.A_ROW, id="day32", date="2026-01-32"),
             dict(self.A_ROW, id="febthirty", date="2026-02-30"),
             dict(self.A_ROW, id="nodate", date=None),
         ]
-        seen = [i for ids in self.sections(self.render_now(rows)).values()
-                for i in ids]
-        self.assertEqual(sorted(seen), ["febthirty", "impossible", "nodate"])
+        got = self.sections(self.render_now(rows))
+        seen = [i for ids in got.values() for i in ids]
+        self.assertEqual(sorted(seen),
+                         ["day32", "febthirty", "month00", "month13", "nodate"])
+        # the non-comparable ones are what the complement rescues; they land in
+        # the later half because !inWindow is true when the comparison is not
+        for rescued in ("month13", "month00", "day32", "nodate"):
+            self.assertIn(rescued, got.get(self.LATER, []))
 
     def test_the_row_she_actually_added_is_on_the_due_tab(self):
         """The production case, by id and description. 2026-09-30 is 50 days
