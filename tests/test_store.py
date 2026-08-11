@@ -106,14 +106,43 @@ class CreateAndReadTests(unittest.TestCase):
         # …and `count` is deliberately different: a row count, not a total
         self.assertEqual(s["count"], 3)
 
+    def test_a_row_is_summed_with_the_cents_it_displays(self):
+        """`money()` shows two decimals, so a row of 1000.124 reads ¥1,000.12.
+        Summed raw, four of them put ¥4,000.50 under ¥4,000.48 of visible
+        items — a total that does not add up on screen, which is the one thing
+        a ledger must never do.
+
+        This is what the cent-rounding in summarize() buys. The
+        total == paid + unpaid invariant below is guarded twice (rounding AND
+        deriving), so neither mutation kills it alone; this one has only the
+        rounding behind it.
+        """
+        for i in range(4):
+            self.store.create(date="2026-07-0%d" % (i + 1), amount="1000.124",
+                              category="living")
+        s = self.store.summary(today="2026-07-31")
+        displayed = sum(round(e.amount, 2) for e in self.store.list())
+        self.assertEqual(s["total"], round(displayed, 2))
+        self.assertEqual(s["total"], 4000.48)
+
     def test_total_is_always_paid_plus_unpaid(self):
         """The invariant that makes the bucket unambiguous, swept rather than
-        asserted at one point (LESSONS §10). Amounts are primes and thirds so
-        no coincidence of round numbers can carry it."""
+        asserted at one point (LESSONS §10).
+
+        The first version of this test used 7.77 / 13.13 / 1039.31 under a
+        docstring claiming "primes and thirds". They are exact two-decimal
+        values, which is the one class where `round(fsum(...), 2)` is an
+        identity — so the invariant held for reasons unrelated to the code and
+        the test could not fail. `_validate_amount` accepts a third decimal and
+        never rounds; four rows of 1000.124 gave total ¥4000.50 against
+        paid + unpaid ¥4000.49. These amounts have third decimals now, and
+        1000.124 is the exact case that broke it.
+        """
         from itertools import product
 
         for i, (amount, category, paid) in enumerate(product(
-            (7.77, 13.13, 1039.31), ("living", "borrow", None), (True, False),
+            (100.035, 33.333, 1000.124, 2.225), ("living", "borrow", None),
+            (True, False),
         )):
             self.store.create(
                 date="2026-07-%02d" % (i + 1), amount=amount, category=category,

@@ -190,7 +190,15 @@ def build_mcp(store: Store) -> FastMCP:
         .summary), or finding an item ('那个足球的' → query='足球').
         status: all|paid|unpaid|overdue. since/until: YYYY-MM-DD.
         .summary describes exactly the rows returned; when a filter is applied
-        .ledger_total carries the whole-ledger figures for context."""
+        .ledger_total carries the whole-ledger figures for context.
+        IN .summary: total/paid/unpaid are HOUSEHOLD SPENDING and leave out
+        category='borrow' (money she fronted); those rows are in .borrow_owed
+        and .borrow_repaid instead. .count counts EVERY returned row, borrow
+        included — it is a count, not a total. So when the list contains a
+        borrow row the items add up to MORE than .total, by design: quote
+        .total for '花了多少', and add .borrow_owed for '她垫了多少'. Never
+        sum the rows yourself to check .total — they are answering two
+        different questions."""
         # read the clock BEFORE selecting rows: the overdue filter inside
         # find()/list() reads it too, and a call straddling midnight then omits
         # a newly-overdue row from the rows AND from the summary figure while
@@ -610,8 +618,13 @@ def build_mcp(store: Store) -> FastMCP:
         return (
             "You are helping settle the family ledger (对账). Call "
             "expenses_list(status='unpaid') and present a short numbered list "
-            "in the user's language with amounts and the total. Then walk "
-            "through it: for each item they say is paid, call "
+            "in the user's language with amounts, then the total from "
+            ".summary.unpaid. That total leaves OUT any category='borrow' row "
+            "in the list — she fronted that money and is owed it back, so it "
+            "is not something to pay. If the list has one, say so on its own "
+            "line using .summary.borrow_owed rather than folding it in; the "
+            "numbered items will otherwise appear to add up to more than the "
+            "total. Then walk through it: for each item they say is paid, call "
             "expenses_mark_paid (today's date unless they say otherwise). "
             "Finish by reporting what's still unpaid."
         )

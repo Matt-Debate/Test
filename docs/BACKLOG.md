@@ -280,3 +280,42 @@ exists and already means "borrow" — so the row stays visible and the household
 total stays honest. That is a UI decision about how she wants repayments shown,
 so it needs the owner, not an agent's initiative. It was deliberately kept out
 of the v0.12.0 hotfix rather than widening a production fix.
+
+## 10. Four smaller things the v0.12.0 review found and did not fix
+
+**Filed 2026-08-12** by the adversarial and cross-model rounds of v0.12.0.
+Each is real, reproduced against shipping code, and deliberately left — the
+release had already had seven fix waves, and LESSONS §1 says that is where
+defects come from.
+
+**a. Two rounded cards need not sum to the rounded section below them.**
+待付 ¥1,234 + 即将到期 ¥5,678 sits above a 待付·未来30天 header reading
+¥6,913, because `money0` rounds each of the three independently. Inherent to
+showing whole yuan, bounded by ¥1, and NOT the same defect as v0.12.0's:
+figures over the *same* row set now agree exactly (`sumAmounts` in integer
+cents on both sides). This is a user adding two figures over *different* row
+sets. Fixing it means showing cents on the cards, which is worse.
+
+**b. The borrow panel's three tiles use three different scopes.** 待还我 is
+all-time outstanding, 我垫付 is a 12-month window labelled 近12个月, and
+已还我 is *also* 12-month-windowed but subtitled only "N 笔". A ¥5,000 loan
+from 2024 plus ¥2,000 this month renders 待还我 ¥7,000 / 我垫付 ¥2,000 /
+已还我 ¥0, which invites 我垫付 = 待还我 + 已还我 and it does not hold. The
+actual defect is the unlabelled window on 已还我. Also `waits` silently drops
+a repayment whose `paid_date` precedes its `date`.
+
+**c. A repaid loan's controls still speak in bill words.** `stateOf` now says
+已还我, but the button under it reads 取消已付 / ✓标记已付 and marking it
+prompts 付款日期 for what is a repayment date. Same shown-vs-meant shape as
+the label fix, one layer out — it wants its own i18n pass rather than a
+one-off string.
+
+**d. Postgres stores `amount` as `REAL` (float4).** Cents stop round-tripping
+at **¥131,072.15** (stored 131072.15625, reads back ¥131,072.16). Pre-existing
+since v0.2.0 and implausible for a single household row — the live ¥347,559 is
+a Python-side sum of doubles, not a stored value — but the store's accepted
+ceiling is ¥1e12, where the error is ~¥4,096. A fix is `NUMERIC(14,2)`, which
+is a typed migration against a live table and the first breaking schema change
+this project would make (`db/schema.sql` says dated migration files start
+there). Not worth doing for a household ledger whose largest row is ¥31,100 —
+worth knowing before anyone raises that ceiling.

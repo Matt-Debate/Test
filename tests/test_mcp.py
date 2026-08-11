@@ -253,6 +253,49 @@ class AgentErgonomicsTests(unittest.TestCase):
         self.assertIn("expenses_list_links", desc["expenses_revoke_link"])
         self.assertNotIn("CLI", desc["expenses_revoke_link"])
 
+    def test_the_summary_says_which_rows_its_totals_cover(self):
+        """P3. Since v0.12.0 `total` excludes borrow while `count` counts every
+        row, so a list containing a borrow row has items summing to MORE than
+        its own total. That is correct and it is surprising, which is exactly
+        the combination that has to be stated where the agent reads — not only
+        in a Python docstring. The 对账 persona previously told the agent to
+        present the rows "with the total" and nothing warned it the two would
+        not reconcile.
+        """
+        desc = " ".join(
+            (t.description or "") for t in run(self.mcp.list_tools())
+            if t.name == "expenses_list"
+        ).split()
+        desc = " ".join(desc)
+        self.assertIn("borrow", desc)
+        self.assertIn("borrow_owed", desc)
+        self.assertIn("count", desc)
+        # the surprising part, in words, not just the key names
+        self.assertIn("more than", desc.lower())
+
+        settle = run(self.mcp.get_prompt("duizhang"))
+        text = " ".join(
+            m.content.text for m in settle.messages if hasattr(m.content, "text")
+        )
+        self.assertIn("borrow_owed", text)
+        self.assertIn("owed", text.lower())
+
+    def test_the_summary_semantics_are_true_of_the_store(self):
+        """The claim above is guidance an agent will ACT on, so it has to match
+        what summarize() does — a wrong tool description causes actions, not
+        just confusion (LESSONS §9)."""
+        self.store.create(date="2026-07-01", amount=300, category="aden-sports")
+        self.store.create(date="2026-07-02", amount=800, category="borrow")
+        out = self.call("expenses_list", status="all")
+        s = out["summary"]
+        self.assertEqual(s["count"], 2)          # counts every row
+        self.assertEqual(s["total"], 300.0)      # …but totals only spending
+        self.assertEqual(s["borrow_owed"], 800.0)
+        listed = sum(e["amount"] for e in out["expenses"])
+        self.assertGreater(listed, s["total"],
+                           "the description promises this can happen")
+        self.assertEqual(round(s["total"] + s["borrow_owed"], 2), listed)
+
     def test_help_lists_the_canonical_categories_and_flags_borrow(self):
         """The agent invented 'loan repayment' because nothing ever told it the
         keys existed. The list has to live where the agent actually reads."""

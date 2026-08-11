@@ -2437,6 +2437,38 @@ console.log(JSON.stringify([_nodes.cards.innerHTML, _nodes.nowBody.innerHTML]));
         sec = re.search(r'本月已付</h2><span class="tot">([^<]+)', body).group(1)
         self.assertEqual(card, sec)
 
+    def test_the_lent_card_and_the_lent_section_agree(self):
+        """The pair the extreme-amounts test above cannot reach.
+
+        待还我 appears twice on one tab over ONE row set: the card renders the
+        SERVER's `borrow_owed` (`round(fsum(...), 2)`, exactly rounded) and the
+        section header sums the same rows in the browser. No sequential `+`
+        equals fsum — these five ordinary amounts gave 47003.49999999999
+        against 47003.5, which `money0` renders as ¥47,003 and ¥47,004. Both
+        fixtures above pass `borrow_owed: 0`, so the card was never rendered
+        with money in it and the disagreement was invisible.
+        """
+        import re
+        from math import fsum
+
+        amounts = [13049.21, 5656.20, 8154.30, 12054.39, 8089.40]
+        rows = [
+            {"id": f"lent{i}", "date": f"2027-01-{i + 1:02d}", "amount": a,
+             "category": "borrow", "description": f"fronted {i}",
+             "paid": False, "paid_date": None}
+            for i, a in enumerate(amounts)
+        ]
+        cards, body = self.render_cards_and_now(rows, {
+            "due_now": 0, "due_now_count": 0, "upcoming": 0, "upcoming_count": 0,
+            # exactly what Store.summarize would have sent for these rows
+            "borrow_owed": round(fsum(amounts), 2),
+            "borrow_owed_count": len(amounts),
+        })
+        card = re.search(r'待还我</div><div class="v">([^<]+)', cards).group(1)
+        sec = re.search(r'待还我</h2><span class="tot">([^<]+)', body).group(1)
+        self.assertEqual(card, sec)
+        self.assertEqual(card, "¥47,004")
+
     def test_repayments_are_listed_newest_first(self):
         """本月已还我 sorts by paid_date descending too. Its fixture had one
         row until now, so any comparator passed."""
@@ -2516,6 +2548,13 @@ console.log(JSON.stringify(_nodes.historyBody.innerHTML));
         {"id": "back2", "date": "2026-07-10", "amount": 60.0,
          "category": "borrow", "description": "repaid earlier",
          "paid": True, "paid_date": "2026-08-02"},
+        # DUE in July, PAID in August. Without one, History and Stats cannot be
+        # told apart from the Due tab's 本月已付: every other non-borrow paid
+        # row here has due month == paid month, so switching History's bucket
+        # to paid_date changed nothing and the agreement test survived it.
+        {"id": "juldue_augpaid", "date": "2026-07-05", "amount": 3000.0,
+         "category": "living", "description": "due July, paid August",
+         "paid": True, "paid_date": "2026-08-03"},
     ]
 
     def state_of(self, row: dict) -> dict:
@@ -2576,12 +2615,13 @@ console.log(JSON.stringify(stateOf({json.dumps(row)})));
         july = [m for m in months if m[0] == "2026-07"]
         self.assertEqual(len(july), 1, months)
         _, txns, paid, outstanding = july[0]
-        # ¥28,000 + ¥2,200 — NOT the ¥31,100 repayment on top
-        self.assertEqual(paid, "¥30,200")
+        # ¥28,000 + ¥2,200 + the ¥3,000 due in July but paid in August —
+        # History buckets by DUE month. NOT the ¥31,100 repayment on top.
+        self.assertEqual(paid, "¥33,200")
         # the ordinary unpaid row only. The ¥500 owed TO her must not appear in
         # a column meaning money she owes.
         self.assertEqual(outstanding, "¥1,235")
-        self.assertEqual(txns, "6", "a borrow row stopped being a transaction")
+        self.assertEqual(txns, "7", "a borrow row stopped being a transaction")
 
     def test_a_borrow_row_is_still_listed_in_its_month(self):
         """Excluded from the total, not from the statement — otherwise this is
@@ -2633,10 +2673,19 @@ expenses = {json.dumps(rows)};
 serverToday = {json.dumps(self.TODAY)};
 serverTodayAt = Date.now();
 serverMidnightIn = 43200;
+// renderStats seeds byMonth from lastMonths(12) and adds only `if (m in
+// byMonth)`. Dropping that window — which this harness did — is a
+// restatement, and it is the permissive kind: a month older than twelve
+// where History shows spending and the real Stats tab shows nothing
+// satisfied the assertion in both directions (LESSONS §3).
 var byMonth = {{}};
+lastMonths(12).forEach(function (m) {{ byMonth[m] = 0; }});
 spendRows().forEach(function (e) {{
   {group}
-  byMonth[m] = (byMonth[m] || 0) + Number(e.amount || 0);
+  if (m in byMonth) byMonth[m] += Number(e.amount || 0);
+}});
+Object.keys(byMonth).forEach(function (m) {{
+  if (!byMonth[m]) delete byMonth[m];
 }});
 console.log(JSON.stringify(byMonth));
 """

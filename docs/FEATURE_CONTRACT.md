@@ -203,8 +203,12 @@ The nav order is Due · Classes · History · Stats.
   recent first, tap to expand into that month's items. Scheduled future months
   sit in their own group below, and since v0.12.0 carry the same `aria-expanded`
   and open state as a past month — the two branches had drifted. **Both money
-  columns exclude borrow** (P4), so they agree with the Due tab and the Stats
-  KPI; the borrow rows are still listed inside the expanded month — an
+  columns exclude borrow** (P4), so they agree with the Stats KPI, which
+  buckets the same way. They deliberately do **not** agree with the Due tab's
+  本月已付: History and Stats bucket by **due** month, the Due tab by
+  **paid_date** month, so a bill due in July and paid in August is July's 已付
+  here and August's 本月已付 there. Both are right for the question they
+  answer; neither is a restatement of the other; the borrow rows are still listed inside the expanded month — an
   outstanding one marked 我垫付, a repaid one 已还我 (since v0.12.0; it read
   已付 before, the same word as a bill it is not counted with). `txns` counts every row, borrow included — it is a count, not a total.
 - **Classes** — prepaid courses. A per-class pack shows classes and money

@@ -491,17 +491,33 @@
   // implementation-defined. Two rows dated 2026-09-30 are exactly that case.
   function byDateAsc(a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; }
   function byDateDesc(a, b) { return byDateAsc(b, a); }
-  // The ONE way this page adds money up. Plain `+` is order-dependent in binary
-  // floating point, and the summary card and the section header below it reduce
-  // the SAME rows in different orders — the card in API order, the section
-  // sorted by paid_date — so at accepted-but-extreme amounts the two headline
-  // figures could differ by a yuan while describing one set. Summing smallest
-  // first makes the result depend on the set alone, which is the same reason
-  // Store.summarize uses fsum rather than `+=`.
+  // How the SECTION HEADERS add money up. Two things went wrong before it, and
+  // the fix for the first was described in a way that hid the second:
+  //
+  //   * the summary card and the section header below it reduced the SAME rows
+  //     in different orders — the card in API order, the section sorted by
+  //     paid_date — and plain `+` is order-dependent in binary floating point;
+  //   * a card whose figure comes from the SERVER (borrow_owed, due_now) is
+  //     `round(fsum(...), 2)`, which is exactly rounded. No sequential `+`
+  //     equals that, sorted or not: five ordinary five-figure amounts summed
+  //     left to right give 47003.49999999999 where fsum gives 47003.5, and
+  //     money0 renders those a yuan apart under the same 待还我 heading.
+  //
+  // So this works in integer CENTS, which is exact for any whole-cent amount —
+  // every row this ledger has ever held, and what the server's own round(...,2)
+  // reduces to anyway. It is NOT a general float fix: an amount with a
+  // sub-cent part still rounds here before summing and inside fsum after, and
+  // those two can differ. The store accepts such amounts (`amount > 0` is the
+  // only constraint), so that residue is real, recorded, and not claimed shut.
+  //
+  // Other places on this page still add with plain `+` — History's two columns,
+  // Stats' buckets, the borrow panel. They are compared against no server
+  // figure, so they cannot produce the disagreement above.
   function sumAmounts(rows) {
-    return rows.map(function (e) { return Number(e.amount || 0); })
-      .sort(function (a, b) { return a - b; })
-      .reduce(function (a, n) { return a + n; }, 0);
+    var cents = rows.reduce(function (a, e) {
+      return a + Math.round(Number(e.amount || 0) * 100);
+    }, 0);
+    return cents / 100;
   }
 
   // `ms` is optional: a confirmation that names what was written needs longer

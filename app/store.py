@@ -645,7 +645,15 @@ class Store:
         counts = {k: 0 for k in ("unpaid_count", "due_now_count",
                                  "upcoming_count", "borrow_owed_count")}
         for e in expenses:
-            amount = float(e.amount or 0)
+            # to CENTS first. `_validate_amount` accepts a third decimal and
+            # never rounds, so the MCP and /api/* can both write one — and then
+            # every bucket fsum'd raw and round()ed independently, which is the
+            # opposite of reconciling: four rows of ¥1000.124 gave total
+            # ¥4000.50 against paid+unpaid ¥4000.49. It also made a row DISPLAY
+            # cents it was not summed with, since money() shows two decimals.
+            # Rounding here is the same model the portal uses (integer cents)
+            # and the same one CNY uses.
+            amount = round(float(e.amount or 0), 2)
             if (e.category or "") == BORROW_CATEGORY:
                 if e.paid:
                     buckets["borrow_repaid"].append(amount)
@@ -673,6 +681,13 @@ class Store:
                 counts["upcoming_count"] += 1
         out: dict[str, Any] = {"count": len(expenses)}
         out.update({k: round(fsum(v), 2) for k, v in buckets.items()})
+        # …and `total` is then DERIVED from the two halves it is supposed to
+        # equal, rather than fsum'd a third time and hoped to match. Three
+        # independent round()s do not reconcile — that is the same failure
+        # summarize_package was rewritten for, one table over. The rounding
+        # above makes these equal already; deriving makes the docstring's
+        # promise true by construction instead of by argument.
+        out["total"] = round(out["paid"] + out["unpaid"], 2)
         out.update(counts)
         return out
 
