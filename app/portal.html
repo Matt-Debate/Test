@@ -759,6 +759,14 @@
       if (!by[m]) by[m] = { m:m, n:0, spent:0, out:0, items:[] };
       by[m].n += 1;
       by[m].items.push(e);
+      // The two money columns are HOUSEHOLD totals, so borrow is excluded from
+      // both — P4, and the third place in this release where that had to be
+      // said. Until v0.12.0 this tab counted a repayment as spending: July read
+      // ¥61,300 已付 where the card, the Due section and the Stats KPI all said
+      // ¥30,200 for the same rows, and the comment above renderStats asserted
+      // the opposite. The ROW is still listed in the expanded month, marked
+      // 待还我 by stateOf — excluded from the total, not from the statement.
+      if (isBorrow(e)) return;
       if (e.paid) by[m].spent += Number(e.amount || 0);
       else by[m].out += Number(e.amount || 0);
     });
@@ -834,6 +842,11 @@
   // ---- tab 3: stats ----
   // Spend = paid, excluding borrow (she fronted that; repaying is not household
   // spending), bucketed by DUE month so this agrees with the statement tab.
+  // That last clause was FALSE until v0.12.0 — renderHistory counted borrow, so
+  // the two differed by the whole repayment (¥31,100 live) while this comment
+  // asserted they matched. Both exclude it now, and
+  // `test_history_and_stats_agree_month_by_month` holds them together rather
+  // than leaving the next reader to trust the sentence (LESSONS §9).
   function lastMonths(n) {
     // anchored on the server's today like every other date decision here
     var parts = todayStr().split("-");

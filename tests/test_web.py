@@ -2410,6 +2410,107 @@ console.log(JSON.stringify([_nodes.cards.innerHTML, _nodes.nowBody.innerHTML]));
         # net was paid 08-10, rent 08-05
         self.assertEqual(self.sections(body).get("本月已付"), ["net", "rent"])
 
+    def render_history(self, rows: list, open_months: list = ()) -> tuple:
+        """The History tab's month rows, as (month, txns, paid, outstanding).
+
+        No test executed renderHistory's totals at all before v0.12.0, which is
+        how it kept counting a repayment as household spending through two
+        rounds that fixed exactly that on two other tabs.
+        """
+        import json
+        import re
+
+        src = self.PORTAL.read_text(encoding="utf-8")
+        block = src[src.index("  var CATS = ["):src.index("  // ---- tab 3: stats ----")]
+        self.assertIn("function renderHistory", block, "block markers moved")
+        script = f"""
+var _nodes = {{}}, localStorage = {{getItem: function () {{ return "zh"; }}}};
+var document = {{
+  getElementById: function (id) {{
+    if (!_nodes[id]) _nodes[id] = {{innerHTML: "", addEventListener: function () {{}}}};
+    return _nodes[id];
+  }},
+  addEventListener: function () {{}},
+}};
+{block}
+expenses = {json.dumps(rows)};
+serverToday = {json.dumps(self.TODAY)};
+serverTodayAt = Date.now();
+serverMidnightIn = 43200;
+{json.dumps(list(open_months))}.forEach(function (m) {{ openMonths[m] = true; }});
+renderHistory();
+console.log(JSON.stringify(_nodes.historyBody.innerHTML));
+"""
+        out = subprocess.run(["node", "-e", script], capture_output=True,
+                             text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        html = json.loads(out.stdout)
+        months = re.findall(
+            r'data-month="([^"]*)"[^>]*>.*?class="n">(\d+)</td><td>([^<]*)</td>'
+            r'(?:<td class="[^"]*">([^<]*)</td>)?',
+            html,
+        )
+        return months, html
+
+    A_BORROW_MONTH = [
+        {"id": "rent7", "date": "2026-07-01", "amount": 28000.0,
+         "category": "living", "description": "Living expenses",
+         "paid": True, "paid_date": "2026-07-01"},
+        {"id": "ball7", "date": "2026-07-15", "amount": 2200.0,
+         "category": "aden-sports", "description": "Football 7月",
+         "paid": True, "paid_date": "2026-07-15"},
+        # the live shape: fronted, due in July, repaid in August
+        {"id": "office", "date": "2026-07-30", "amount": 31100.0,
+         "category": "borrow", "description": "Borrowed — office",
+         "paid": True, "paid_date": "2026-08-05"},
+        {"id": "owed", "date": "2026-07-20", "amount": 500.0,
+         "category": "borrow", "description": "still owed to me",
+         "paid": False, "paid_date": None},
+    ]
+
+    def test_history_month_totals_exclude_what_she_fronted(self):
+        """P4 — the third tab this had to be said on. July read ¥61,300 已付
+        where the card, the Due section and the Stats KPI all said ¥30,200 for
+        the same rows. And 未付 carried ¥500 owed TO her under a header meaning
+        money she owes."""
+        months, _ = self.render_history(self.A_BORROW_MONTH)
+        july = [m for m in months if m[0] == "2026-07"]
+        self.assertEqual(len(july), 1, months)
+        _, txns, paid, outstanding = july[0]
+        self.assertEqual(paid, "¥30,200")
+        self.assertIn(outstanding, ("", "–"), "money owed TO her read as owed BY her")
+        self.assertEqual(txns, "4", "a borrow row stopped being a transaction")
+
+    def test_a_borrow_row_is_still_listed_in_its_month(self):
+        """Excluded from the total, not from the statement — otherwise this is
+        the same 'filter with no complement' the release exists to fix.
+
+        The month has to be EXPANDED for this to mean anything: asserting the
+        month row exists proves only that some row is in that bucket, which the
+        totals test already covers.
+        """
+        _, html = self.render_history(self.A_BORROW_MONTH, open_months=["2026-07"])
+        for row_id in ("rent7", "ball7", "office", "owed"):
+            with self.subTest(row_id):
+                self.assertIn(f'data-id="{row_id}"', html)
+        self.assertIn("st lend", html, "the borrow rows lost their 待还我 marking")
+
+    def test_history_and_stats_agree_month_by_month(self):
+        """The comment above renderStats claims they agree. It was false for
+        four releases; this is what makes it a checked claim instead of a
+        sentence (LESSONS §9)."""
+        months, _ = self.render_history(self.A_BORROW_MONTH)
+        spent = {m[0]: m[2] for m in months}
+        # Stats' own rule, computed here independently: paid, non-borrow, by
+        # DUE month — the same buckets History now uses
+        want = {}
+        for e in self.A_BORROW_MONTH:
+            if e["paid"] and e["category"] != "borrow":
+                key = e["date"][:7]
+                want[key] = want.get(key, 0) + e["amount"]
+        for key, total in want.items():
+            self.assertEqual(spent.get(key), f"¥{total:,.0f}")
+
     def a_sweep(self) -> list:
         """One unpaid row per day-offset across a 460-day span.
 

@@ -71,6 +71,19 @@ Cut as a **minor** for the same reason 0.11.0 was: it changes what she sees.
   `!inWindow(e)`, which cannot have that hole whatever `daysBetween` returns —
   so the renderer no longer depends on the store's validation being perfect,
   and a bad row already in the database still appears.
+- **History counted a repayment as household spending** — the third tab this
+  had to be said on, and the one this release had not audited. Its 已付/未付
+  columns summed every row with no borrow guard, so **2026-07 read ¥61,300 已付
+  where the card, the Due section and the Stats KPI all said ¥30,200 for the
+  same rows**, and 未付 carried money owed *to* her under a header meaning money
+  she owes. Both columns now exclude borrow. The rows are still listed inside
+  the expanded month, marked 待还我 — excluded from the total, not from the
+  statement, which is the distinction §9 of the backlog was closed on.
+
+  The comment above `renderStats` had asserted for four releases that the two
+  tabs agree ("bucketed by DUE month so this agrees with the statement tab").
+  It was false by the whole repayment. `test_history_and_stats_agree_month_by_month`
+  now holds them together instead of the sentence claiming it (LESSONS §9).
 - **A scheduled month in History announced itself wrongly.** The future branch
   of `renderHistory` was written separately from the past branch and drifted: no
   `aria-expanded`, no `open` class, so a screen reader heard a plain row and the
