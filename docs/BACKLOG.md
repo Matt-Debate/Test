@@ -239,11 +239,22 @@ go-ahead rather than an agent's initiative.
    `pg_dump` to local storage. Note that the dump contains real household
    financial data and every live portal token — treat it like a secret (P9).
 
-## 9. "本月已付" is two different numbers on the same tab
+## 9. ~~"本月已付" is two different numbers on the same tab~~ — CLOSED
 
-**Filed 2026-08-11** while rendering the Due tab against live data during the
-v0.12.0 fix. Priority: medium — no stored total is wrong, but it is a visible
-money disagreement in the place she looks, and P4 is what it disagrees about.
+**Filed and closed 2026-08-11**, both in v0.12.0: filed while rendering the Due
+tab against live data, then fixed the same day at the owner's direction rather
+than deferred.
+
+**Closed by** excluding borrow from the paid list — so the card and the section
+agree at ¥24,399 — *and* giving the repayment a `本月已还我` section, which is
+what the entry below said the real fix had to do. Three guards:
+`test_the_paid_card_and_the_paid_section_agree`,
+`test_household_spending_excludes_what_she_fronted` (equality alone is
+satisfiable at the wrong figure) and `test_a_repayment_is_still_shown_somewhere`
+(the complement). All three mutation-checked.
+
+The original entry follows, because the reasoning about *why the obvious fix was
+wrong* is the part worth keeping.
 
 The summary **card** headed 本月已付 excludes borrow (`renderCards` filters
 `!isBorrow(e)`, correct — money she fronted is not household spending). The

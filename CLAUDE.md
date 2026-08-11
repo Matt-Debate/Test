@@ -106,7 +106,7 @@ transcript, a commit, or a doc. Pipe secrets straight into env vars
 ## Commands
 
 ```bash
-python3 -m unittest discover -s tests     # 347 tests, sqlite, no DB server
+python3 -m unittest discover -s tests     # 350 tests, sqlite, no DB server
 python3 -m app.main                       # local run, http://localhost:8080
 PORTAL_DEV_RELOAD=1 python3 -m app.main   # …and re-read portal.html per request
 python3 scripts/mint_link.py --label X --base-url URL   # mint portal link

@@ -190,9 +190,12 @@ The nav order is Due · Classes · History · Stats.
   owed back to her), collapsible add form, then the unpaid rows. **Since
   v0.12.0 those are a partition of one list, not a filter:** `待付 · 未来30天`
   and `待付 · 30天以后`, both rendered expanded, so no unpaid row is invisible
-  here. Owed-back-to-her keeps its own section, and what was paid this month
-  closes the tab. The 30-day horizon on the summary *cards* is unchanged and
-  deliberate (`Store.summarize`). Adding a row confirms with the description,
+  here. Owed-back-to-her keeps its own section; `本月已付` follows, and
+  **excludes borrow** so it means the same thing as the card above it (they
+  disagreed by ¥31,100 until v0.12.0); a repayment received this month closes
+  the tab in `本月已还我`. The 30-day horizon on the summary *cards* is
+  unchanged and deliberate (`Store.summarize`). Adding a row confirms with the
+  description,
   due date and amount **the server stored**, read from the response.
   `DueTabVisibilityTests` sweeps today−60 … today+400 and fails if any unpaid
   row reaches no section.

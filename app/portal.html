@@ -328,7 +328,7 @@
       cls_logged:"已记录", cls_capped:"超出上限", cls_sec:"课程", cls_of:"共",
       ev:{ attended:"上了", missed_school:"停课", missed_us:"没去" },
       sec_due:"待付 · 未来30天", sec_later:"待付 · 30天以后",
-      sec_paid:"本月已付", sec_lent:"待还我",
+      sec_paid:"本月已付", sec_lent:"待还我", sec_repaid:"本月已还我",
       empty_due:"没有待付的", empty_paid:"本月还没有付款记录", empty_all:"还没有记录",
       mark_paid:"✓ 标记已付", unmark:"取消已付", edit:"编辑", del:"删除", hist:"记录",
       save:"保存", cancel:"取消", paid_on:"付款日期", confirm_del:"确定删除这条？",
@@ -372,6 +372,7 @@
       ev:{ attended:"attended", missed_school:"cancelled", missed_us:"skipped" },
       sec_due:"Due · next 30 days", sec_later:"Due · beyond 30 days",
       sec_paid:"Paid this month", sec_lent:"Owed to me",
+      sec_repaid:"Repaid to me this month",
       empty_due:"Nothing due", empty_paid:"No payments yet this month", empty_all:"Nothing yet",
       mark_paid:"✓ Mark paid", unmark:"Unmark paid", edit:"Edit", del:"Delete", hist:"History",
       save:"Save", cancel:"Cancel", paid_on:"Paid on", confirm_del:"Delete this entry?",
@@ -709,19 +710,33 @@
     }).sort(byDateAsc);
 
     var lent = expenses.filter(function (e) { return !e.paid && isBorrow(e); })
-      .sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+      .sort(byDateAsc);
 
-    var paid = expenses.filter(function (e) {
-      return e.paid && (e.paid_date || "").slice(0, 7) === month;
-    }).sort(function (a, b) {
+    var byPaidDate = function (a, b) {
       var x = a.paid_date || "", y = b.paid_date || "";
       return x > y ? -1 : x < y ? 1 : 0;
-    });
+    };
+    // 本月已付 is HOUSEHOLD SPENDING, so borrow is excluded — P4, and the
+    // summary card directly above already excluded it. They did not agree: the
+    // card read ¥24,399 and this header read ¥55,499 over the same two words,
+    // the ¥31,100 gap being a repayment of money she had fronted.
+    var thisMonth = function (e) { return (e.paid_date || "").slice(0, 7) === month; };
+    var paid = expenses.filter(function (e) {
+      return e.paid && !isBorrow(e) && thisMonth(e);
+    }).sort(byPaidDate);
+    // …and it goes HERE rather than nowhere. Dropping borrow from 本月已付
+    // without this is the same defect the section above was added to fix:
+    // 待还我 carries only what is still owed, so a repayment would have
+    // vanished from the tab entirely.
+    var repaid = expenses.filter(function (e) {
+      return e.paid && isBorrow(e) && thisMonth(e);
+    }).sort(byPaidDate);
 
     var html = section("sec_due", due, "empty_due");
     if (later.length) html += section("sec_later", later, "empty_all");
     if (lent.length) html += section("sec_lent", lent, "empty_all");
     html += section("sec_paid", paid, "empty_paid");
+    if (repaid.length) html += section("sec_repaid", repaid, "empty_all");
     $("nowBody").innerHTML = html;
   }
 

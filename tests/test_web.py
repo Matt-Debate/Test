@@ -2185,6 +2185,88 @@ console.log(JSON.stringify(_nodes.nowBody.innerHTML));
 
         return _json.loads(out.stdout)
 
+    def render_cards_and_now(self, rows: list, summary: dict) -> tuple:
+        """Both halves of the Due tab from ONE render, so the card and the
+        section header below it can be compared as she sees them."""
+        import json
+
+        src = self.PORTAL.read_text(encoding="utf-8")
+        block = src[src.index("  var CATS = ["):src.index("  // ---- tab 3: stats ----")]
+        self.assertIn("function renderCards", block, "block markers moved")
+        script = f"""
+var _nodes = {{}}, localStorage = {{getItem: function () {{ return "zh"; }}}};
+var document = {{
+  getElementById: function (id) {{
+    if (!_nodes[id]) _nodes[id] = {{innerHTML: "", addEventListener: function () {{}}}};
+    return _nodes[id];
+  }},
+  addEventListener: function () {{}},
+}};
+{block}
+expenses = {json.dumps(rows)};
+summary = {json.dumps(summary)};
+serverToday = {json.dumps(self.TODAY)};
+serverTodayAt = Date.now();
+serverMidnightIn = 43200;
+renderCards();
+renderNow();
+console.log(JSON.stringify([_nodes.cards.innerHTML, _nodes.nowBody.innerHTML]));
+"""
+        out = subprocess.run(["node", "-e", script], capture_output=True,
+                             text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        import json as _json
+
+        return tuple(_json.loads(out.stdout))
+
+    A_MONTH = [
+        {"id": "rent", "date": "2026-08-31", "amount": 22000.0,
+         "category": "living", "description": "Living expenses",
+         "paid": True, "paid_date": "2026-08-05"},
+        {"id": "net", "date": "2026-08-10", "amount": 399.0,
+         "category": "utilities", "description": "Internet",
+         "paid": True, "paid_date": "2026-08-10"},
+        # the row that made the two figures disagree: money she fronted,
+        # repaid this month. ¥31,100 is the live amount.
+        {"id": "office", "date": "2026-07-30", "amount": 31100.0,
+         "category": "borrow", "description": "Borrowed — office",
+         "paid": True, "paid_date": "2026-08-05"},
+    ]
+
+    def paid_figures(self) -> tuple:
+        import re
+
+        cards, body = self.render_cards_and_now(self.A_MONTH, {
+            "due_now": 0, "due_now_count": 0, "upcoming": 0,
+            "upcoming_count": 0, "borrow_owed": 0, "borrow_owed_count": 0,
+        })
+        card = re.search(r'本月已付</div><div class="v">([^<]+)', cards)
+        sec = re.search(r'本月已付</h2><span class="tot">([^<]+)', body)
+        self.assertIsNotNone(card, f"paid card not rendered: {cards}")
+        self.assertIsNotNone(sec, f"paid section not rendered: {body}")
+        return card.group(1), sec.group(1), body
+
+    def test_the_paid_card_and_the_paid_section_agree(self):
+        """They read the same two words over different numbers: ¥24,399 on the
+        card, ¥55,499 on the section header. The card excluded borrow (P4); the
+        section totalled whatever rows it was handed."""
+        card, sec, _ = self.paid_figures()
+        self.assertEqual(card, sec)
+
+    def test_household_spending_excludes_what_she_fronted(self):
+        """Not just equal — equal to the RIGHT figure. Both agreeing on ¥55,499
+        would satisfy the test above and still count a repayment as spending."""
+        card, sec, _ = self.paid_figures()
+        self.assertEqual(card, "¥22,399")
+
+    def test_a_repayment_is_still_shown_somewhere(self):
+        """The complement. Excluding borrow from 本月已付 without giving it a
+        home is the same defect as the 30-day filter: 待还我 carries only what
+        is still owed, so a repaid row would leave the tab entirely."""
+        _, _, body = self.paid_figures()
+        self.assertIn('data-id="office"', body)
+        self.assertIn("本月已还我", body)
+
     def a_sweep(self) -> list:
         """One unpaid row per day-offset across a 460-day span.
 

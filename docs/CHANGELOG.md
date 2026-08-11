@@ -30,9 +30,10 @@ Cut as a **minor** for the same reason 0.11.0 was: it changes what she sees.
   **cards** is unchanged — that horizon is deliberate (`Store.summarize`), and
   the bug was never the horizon, it was a list with no other half.
 
-  Cost: she added the same course twice. `dfa796a090b0` (`10月足球课`) and
-  `3dc9ed78d440` (`football （10月）`) are both live, both ¥1,980, both due
-  2026-09-30. Left in place — which one to keep is hers to decide.
+  Cost: she added the same course twice. `3dc9ed78d440` (`football （10月）`,
+  the later of the two) was deleted by the owner on 2026-08-11 once both became
+  visible; `dfa796a090b0` (`10月足球课`, ¥1,980, due 2026-09-30) is the one that
+  stands. Unpaid went ¥261,860 → ¥259,880.
 - **The add confirmation now names what the server stored** — description, due
   date and amount, read from the response rather than from the form. It was a
   1.7s flash of the constant "已添加" over a list that did not move, which is
@@ -40,6 +41,20 @@ Cut as a **minor** for the same reason 0.11.0 was: it changes what she sees.
   confirmed a write that may not have happened that way (a cleared date becomes
   the household's today), so the row comes from the response and the toast is
   given 3.2s and a width bound to stay readable on a phone.
+- **"本月已付" was two different numbers on the same tab.** The summary card
+  read **¥24,399** and the section header directly below it read **¥55,499** —
+  the same two words over a ¥31,100 gap. The card excluded borrow (P4: money
+  she fronted is not household spending); `section()` totals whatever rows it
+  is handed, and the paid list had no borrow filter. Found by rendering the
+  shipping `renderCards`/`renderNow` under node against the live ledger, not by
+  the suite.
+
+  The paid list now excludes borrow, so the two agree at ¥24,399 — **and the
+  repayment goes somewhere**, into a new `本月已还我` section, rather than
+  disappearing. Dropping it without that would have recreated the bug above:
+  `待还我` carries only what is still *owed*, so a repaid row would have left
+  the tab entirely. `Store.summarize` is untouched; both figures were
+  portal-side sums.
 - **A scheduled month in History announced itself wrongly.** The future branch
   of `renderHistory` was written separately from the past branch and drifted: no
   `aria-expanded`, no `open` class, so a screen reader heard a plain row and the
@@ -60,8 +75,13 @@ Cut as a **minor** for the same reason 0.11.0 was: it changes what she sees.
   does **not** echo the form (typed date and amount differ from the response —
   the case that discriminates); and a response carrying no row degrades to the
   old one-word toast instead of printing "undefined".
-- All four mutation-checked, each target verified green and resolvable first
-  (P5).
+- Three more pin the paid figures: the card and the section agree; they agree
+  on the figure that **excludes** what she fronted (both reading ¥55,499 would
+  satisfy equality alone and still be wrong); and a repayment is still rendered
+  somewhere.
+- All seven mutation-checked, each target verified green and resolvable first
+  (P5) — including a mutation that "fixes" the disagreement by making the card
+  count borrow too.
 - `scripts/smoke_live.py` pins the 30-day boundary against real Postgres: a row
   200 days out is unpaid but not upcoming. Recorded there — and here — that this
   assertion would **not** have caught this bug: `/api/list` was correct
