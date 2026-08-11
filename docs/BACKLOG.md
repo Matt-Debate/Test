@@ -238,3 +238,34 @@ go-ahead rather than an agent's initiative.
 3. A cheaper standing backstop, if the window turns out to be short: a periodic
    `pg_dump` to local storage. Note that the dump contains real household
    financial data and every live portal token — treat it like a secret (P9).
+
+## 9. "本月已付" is two different numbers on the same tab
+
+**Filed 2026-08-11** while rendering the Due tab against live data during the
+v0.12.0 fix. Priority: medium — no stored total is wrong, but it is a visible
+money disagreement in the place she looks, and P4 is what it disagrees about.
+
+The summary **card** headed 本月已付 excludes borrow (`renderCards` filters
+`!isBorrow(e)`, correct — money she fronted is not household spending). The
+**section** headed 本月已付 immediately below it does not: `section()` totals
+whatever rows it is given, and the `paid` list has no borrow filter. With the
+live ledger that is **¥24,399 on the card and ¥55,499 on the section header** —
+the same two words over a ¥31,100 gap, which is her 陈美霖 office repayment.
+
+Reproduced by running the shipping `renderCards`/`renderNow` under node against
+the 26 production rows; no stored figure is affected and `Store.summarize` is
+not involved (both are portal-side sums).
+
+**Why it is filed rather than fixed.** The obvious fix — drop borrow from the
+`paid` list — recreates the bug v0.12.0 just fixed: a repaid borrow would then
+appear in no section of the Due tab at all, because `sec_lent` only carries
+**unpaid** borrow. That is "a filter with no complement" again (LESSONS §12).
+Excluding it from the total while leaving the row listed is worse: the total
+would stop describing the rows under it, which is the one thing P4 says a
+summary must never do.
+
+**What a real fix looks like.** Give 待还我 a repaid half — the section already
+exists and already means "borrow" — so the row stays visible and the household
+total stays honest. That is a UI decision about how she wants repayments shown,
+so it needs the owner, not an agent's initiative. It was deliberately kept out
+of the v0.12.0 hotfix rather than widening a production fix.
