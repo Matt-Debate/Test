@@ -22,6 +22,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -206,6 +207,31 @@ async def exercise_public_mcp(base: str) -> None:
                 assert [h["action"] for h in history["history"]] == [
                     "create", "update", "mark_paid",
                 ]
+
+                # The 30-day boundary, against real Postgres. The Due tab
+                # partitions unpaid rows on it, so a row past the horizon must
+                # be unpaid-but-not-upcoming — if those two ever stop being
+                # different questions, one of the portal's two sections is
+                # empty for the wrong reason.
+                #
+                # Being straight about what this does NOT cover: from v0.6.0 to
+                # v0.12.0 the portal hid every such row, and this layer stayed
+                # green throughout — /api/list was correct the whole time and
+                # the loss was in rendering. DueTabVisibilityTests is the guard
+                # for that; this one pins the semantics it relies on.
+                far_date = (date.today() + timedelta(days=200)).isoformat()
+                far = _tool_payload(await session.call_tool("expenses_add", {
+                    "amount": "1980", "date": far_date,
+                    "description": "[smoke-mcp] far-future 足球课",
+                    "category": "aden-sports", "submitted_by": "smoke-mcp",
+                }))
+                created_ids.append(far["id"])
+                horizon = _tool_payload(await session.call_tool(
+                    "expenses_list", {"status": "unpaid", "query": "far-future"}
+                ))
+                assert far["id"] in {e["id"] for e in horizon["expenses"]}, horizon
+                s = horizon["summary"]
+                assert s["unpaid_count"] == 1 and s["upcoming_count"] == 0, s
 
                 # The class tracker, end to end. Until v0.11.0 these three
                 # tools appeared in this script only as names in the inventory

@@ -5,10 +5,67 @@ to a release entry when a chunk set ships.
 
 ## [Unreleased]
 
-Nothing pending. (The block that sat here described `CLAUDE.md` and
-`scripts/smoke_live.py`, both of which shipped in 0.4.2–0.4.4 and were never
-moved into a release entry; `git log` places them and the entries below now
-carry them.)
+Nothing pending.
+
+## [0.12.0] — 2026-08-11
+
+A production report: she added a ¥1,980 football course for 10月 and it was
+"absent from the app". **Nothing was lost** — the row was in Postgres, correct,
+from the moment she saved it. It was invisible on the tab she adds from.
+
+Cut as a **minor** for the same reason 0.11.0 was: it changes what she sees.
+
+### Fixed
+- **The Due tab hid every unpaid row due more than 30 days out.** `renderNow`
+  has filtered `daysBetween(today, e.date) <= 30` since the v0.6.0 redesign and
+  no test has ever executed it. It went unnoticed while rows were near-term. On
+  2026-08-11 she entered five months of course fees in four minutes; the first
+  one due in 50 days landed in no list and no card, and the History tab kept it
+  inside a collapsed `已排期` month. Running the shipped `renderNow` against the
+  live rows returns `没有待付的` — an empty Due tab, which is what she saw.
+
+  The tab now partitions **one** unpaid list into `待付 · 未来30天` and
+  `待付 · 30天以后`, rather than filtering with one predicate and dropping the
+  remainder. Both sections render expanded. The 30-day window on the summary
+  **cards** is unchanged — that horizon is deliberate (`Store.summarize`), and
+  the bug was never the horizon, it was a list with no other half.
+
+  Cost: she added the same course twice. `dfa796a090b0` (`10月足球课`) and
+  `3dc9ed78d440` (`football （10月）`) are both live, both ¥1,980, both due
+  2026-09-30. Left in place — which one to keep is hers to decide.
+- **The add confirmation now names what the server stored** — description, due
+  date and amount, read from the response rather than from the form. It was a
+  1.7s flash of the constant "已添加" over a list that did not move, which is
+  indistinguishable from nothing happening. Echoing the *form* would have
+  confirmed a write that may not have happened that way (a cleared date becomes
+  the household's today), so the row comes from the response and the toast is
+  given 3.2s and a width bound to stay readable on a phone.
+- **A scheduled month in History announced itself wrongly.** The future branch
+  of `renderHistory` was written separately from the past branch and drifted: no
+  `aria-expanded`, no `open` class, so a screen reader heard a plain row and the
+  caret never rotated. Its item sort was also `a.date > b.date ? -1 : 1`, which
+  claims `a > b` **and** `b > a` for two rows on the same day — an inconsistent
+  comparator, and her two 2026-09-30 rows are exactly that case. Both branches
+  now share `byDateAsc`/`byDateDesc`, which return 0 for equal dates.
+
+### Tests
+- `DueTabVisibilityTests` — the guard that was missing. Sweeps one unpaid row
+  per day across today−60 … today+400 and asserts **every** one reaches the
+  markup. On the old code 369 of 460 rendered nowhere. A test that merely
+  asserted "the Later section exists" would pass on a section with the wrong
+  predicate or one nothing puts rows into (LESSONS §8), which is why it sweeps.
+  It runs the shipping `esc`/`money`/`daysBetween`/`isBorrow`/`stateOf`, not
+  stubs of them.
+- `ExpenseAddFormTests` gains three: the confirmation names the stored row; it
+  does **not** echo the form (typed date and amount differ from the response —
+  the case that discriminates); and a response carrying no row degrades to the
+  old one-word toast instead of printing "undefined".
+- All four mutation-checked, each target verified green and resolvable first
+  (P5).
+- `scripts/smoke_live.py` pins the 30-day boundary against real Postgres: a row
+  200 days out is unpaid but not upcoming. Recorded there — and here — that this
+  assertion would **not** have caught this bug: `/api/list` was correct
+  throughout and the loss was in rendering.
 
 ## [0.11.0] — 2026-08-11
 

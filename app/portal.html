@@ -205,7 +205,12 @@
     bottom:calc(80px + env(safe-area-inset-bottom));
     background:var(--text); color:var(--bg); border-radius:var(--radius);
     padding:10px 18px; font-size:.9rem; opacity:0; transition:opacity .2s;
-    pointer-events:none; }
+    pointer-events:none;
+    /* the add confirmation echoes the stored row — description, date and
+       amount — which is far longer than the one-word toasts this started as.
+       Centred by translateX(-50%) with no width bound, it ran off both edges
+       of a phone and the confirmation could not be read. */
+    max-width:min(92vw, 420px); text-align:center; overflow-wrap:anywhere; }
   .toast.show { opacity:.96; }
   .lang { width:auto; padding:5px 2px; border:0; cursor:pointer;
     font-size:.8rem; flex:0 0 auto; background:transparent;
@@ -322,7 +327,8 @@
       cls_confirm_unlog:"删除这条上课记录？", cls_over:"超出",
       cls_logged:"已记录", cls_capped:"超出上限", cls_sec:"课程", cls_of:"共",
       ev:{ attended:"上了", missed_school:"停课", missed_us:"没去" },
-      sec_due:"待付 · 未来30天", sec_paid:"本月已付", sec_lent:"待还我",
+      sec_due:"待付 · 未来30天", sec_later:"待付 · 30天以后",
+      sec_paid:"本月已付", sec_lent:"待还我",
       empty_due:"没有待付的", empty_paid:"本月还没有付款记录", empty_all:"还没有记录",
       mark_paid:"✓ 标记已付", unmark:"取消已付", edit:"编辑", del:"删除", hist:"记录",
       save:"保存", cancel:"取消", paid_on:"付款日期", confirm_del:"确定删除这条？",
@@ -364,7 +370,8 @@
       cls_confirm_unlog:"Delete this class record?", cls_over:"over",
       cls_logged:"Logged", cls_capped:"capped, over by", cls_sec:"Courses", cls_of:"of",
       ev:{ attended:"attended", missed_school:"cancelled", missed_us:"skipped" },
-      sec_due:"Due · next 30 days", sec_paid:"Paid this month", sec_lent:"Owed to me",
+      sec_due:"Due · next 30 days", sec_later:"Due · beyond 30 days",
+      sec_paid:"Paid this month", sec_lent:"Owed to me",
       empty_due:"Nothing due", empty_paid:"No payments yet this month", empty_all:"Nothing yet",
       mark_paid:"✓ Mark paid", unmark:"Unmark paid", edit:"Edit", del:"Delete", hist:"History",
       save:"Save", cancel:"Cancel", paid_on:"Paid on", confirm_del:"Delete this entry?",
@@ -475,10 +482,19 @@
     return (e.category && map[e.category]) ? map[e.category] : (e.category || "");
   }
   function isBorrow(e) { return e.category === BORROW; }
+  // Both comparators return 0 for equal dates. The History tab's scheduled
+  // branch used `a.date > b.date ? -1 : 1`, which claims a>b AND b>a for two
+  // rows on the same day — an inconsistent comparator, and its order is
+  // implementation-defined. Two rows dated 2026-09-30 are exactly that case.
+  function byDateAsc(a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; }
+  function byDateDesc(a, b) { return byDateAsc(b, a); }
 
-  function toast(msg) {
+  // `ms` is optional: a confirmation that names what was written needs longer
+  // on screen than "已保存". Shortening the message to fit the old 1.7s would
+  // throw away the part that makes it a confirmation at all.
+  function toast(msg, ms) {
     var el = $("toast"); el.textContent = msg; el.classList.add("show");
-    setTimeout(function () { el.classList.remove("show"); }, 1700);
+    setTimeout(function () { el.classList.remove("show"); }, ms || 1700);
   }
   function api(name, body) {
     body = body || {}; body.token = TOKEN;
@@ -675,9 +691,22 @@
   // ---- tab 1: what is actually due, then what was actually paid ----
   function renderNow() {
     var today = todayStr(), month = today.slice(0, 7);
-    var due = expenses.filter(function (e) {
-      return !e.paid && !isBorrow(e) && daysBetween(today, e.date) <= 30;
-    }).sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+    // ONE unpaid list, split in two — not two independent predicates. The Due
+    // tab used to render `<= 30` and nothing else, so a row due in 50 days
+    // appeared in no list and no card: she added a ¥1,980 course, the page did
+    // not move, and she added it again. Both rows are in production.
+    // Partitioning a single list means no row can fall between the halves the
+    // way it fell off the end of the old one.
+    var unpaid = expenses.filter(function (e) { return !e.paid && !isBorrow(e); });
+    var due = unpaid.filter(function (e) {
+      return daysBetween(today, e.date) <= 30;
+    }).sort(byDateAsc);
+    // Rendered expanded, like every other section. Collapsed-by-default plus a
+    // rule about when to auto-open it would be a second source of truth about
+    // what she can see, which is the shape that caused this bug's neighbours.
+    var later = unpaid.filter(function (e) {
+      return daysBetween(today, e.date) > 30;
+    }).sort(byDateAsc);
 
     var lent = expenses.filter(function (e) { return !e.paid && isBorrow(e); })
       .sort(function (a, b) { return a.date < b.date ? -1 : 1; });
@@ -690,6 +719,7 @@
     });
 
     var html = section("sec_due", due, "empty_due");
+    if (later.length) html += section("sec_later", later, "empty_all");
     if (lent.length) html += section("sec_lent", lent, "empty_all");
     html += section("sec_paid", paid, "empty_paid");
     $("nowBody").innerHTML = html;
@@ -749,9 +779,7 @@
           "</tr>";
         if (!open) return head;
         // due date ascending within the month — reads like a statement
-        var items = r.items.slice().sort(function (a, b) {
-          return a.date > b.date ? -1 : a.date < b.date ? 1 : 0;
-        });
+        var items = r.items.slice().sort(byDateDesc);
         return head +
           '<tr class="drow"><td colspan="' + cols + '">' +
             '<div class="detail">' + listHtml(items) + "</div>" +
@@ -760,16 +788,22 @@
       (future.length
         ? '<tr class="grp"><td colspan="' + cols + '">' + esc(t("scheduled")) + "</td></tr>" +
           future.map(function (r) {
-            return '<tr class="mrow soon" data-month="' + esc(r.m) + '" role="button" tabindex="0">' +
+            // same open state and same ARIA as a past month: this branch was
+            // written separately and drifted, so a scheduled month announced
+            // itself to a screen reader as a plain row and never rotated its
+            // caret. It is the same control.
+            var fopen = !!openMonths[r.m];
+            return '<tr class="mrow soon' + (fopen ? " open" : "") +
+              '" data-month="' + esc(r.m) + '" role="button" tabindex="0"' +
+              ' aria-expanded="' + (fopen ? "true" : "false") + '">' +
               '<td><span class="caret">›</span>' + esc(r.m) + "</td>" +
               '<td class="n">' + esc(String(r.n)) + "</td>" +
               "<td>" + esc(money0(r.spent)) + "</td>" +
               (anyOut ? '<td class="' + (r.out ? "out" : "zero") + '">' +
                 (r.out ? esc(money0(r.out)) : "–") + "</td>" : "") + "</tr>" +
-              (openMonths[r.m]
+              (fopen
                 ? '<tr class="drow"><td colspan="' + cols + '"><div class="detail">' +
-                  listHtml(r.items.slice().sort(function (a, b) {
-                    return a.date > b.date ? -1 : 1; })) + "</div></td></tr>"
+                  listHtml(r.items.slice().sort(byDateDesc)) + "</div></td></tr>"
                 : "");
           }).join("")
         : "") + "</tbody></table>";
@@ -1167,6 +1201,15 @@
   }
 
   // ---- add ----
+  // What was written, in the order she reads it. Falls back to the bare word
+  // when the server sent no row back, so a response-shape change degrades to
+  // the old confirmation instead of printing "undefined" over her ledger.
+  function addedMsg(e) {
+    if (!e) return t("added");
+    return t("added") + " · " + (e.description || categoryLabel(e) || "–") +
+      " · " + e.date + " · " + money(e.amount);
+  }
+
   $("addForm").addEventListener("submit", function (ev) {
     ev.preventDefault();
     api("submit", {
@@ -1174,10 +1217,16 @@
       amount: parseFloat($("amount").value),
       category: $("category").value,
       description: $("desc").value.trim() || null,
-    }).then(function () {
+    }).then(function (j) {
       $("amount").value = ""; $("desc").value = "";
       $("addWrap").open = false;
-      toast(t("added")); refresh();
+      // Confirm with the row the SERVER stored, never with the fields she
+      // typed. The two are not the same thing — a cleared date becomes the
+      // household's today, an amount is normalised — and echoing the form
+      // would confirm a write that did not happen that way. It is the same
+      // rule as the class date box: the value shown must be the value written.
+      toast(addedMsg(j && j.expense), 3200);
+      refresh();
     }).catch(function (e) { toast(e.message); });
   });
 

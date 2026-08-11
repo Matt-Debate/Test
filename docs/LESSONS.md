@@ -217,7 +217,36 @@ real fix would take.
 
 ---
 
-## 12. Pin every number a living doc asserts, not just the one that bit you
+## 12. A filter with no other half hides rows, and only the user finds out
+
+**What happened.** The Due tab rendered `daysBetween(today, e.date) <= 30` and
+nothing else. For four releases that was invisible, because everything in the
+ledger was near-term. Then she entered five months of course fees in four
+minutes, and the first row due in 50 days appeared in **no list and no card** —
+History kept it inside a collapsed month. The success toast was a 1.7s flash of
+a constant over a list that did not move, so from her side the app had done
+nothing. She added the same ¥1,980 course again. Both rows are in production.
+
+No test had ever executed `renderNow`. The suite was 341 tests green.
+
+**Rule.** When a view filters a set, ask where the complement is rendered. "Not
+shown here" must be "shown there", never "shown nowhere" — so partition ONE
+list rather than filtering with a predicate and dropping the remainder; the
+complement then cannot be forgotten. And confirm a write by echoing what the
+**server stored**, not what the form held: a constant toast is
+indistinguishable from nothing happening, and echoing the form confirms a write
+that may not have happened that way. The guard for this is a sweep across the
+boundary asserting every row reaches the markup — an "is the section there?"
+assertion passes on a section nothing puts rows into.
+
+**Corollary that cost the most here:** the report was "it's absent from the
+app", which sounds like data loss. It was not — the row was in Postgres and
+correct the whole time. Query production **before** touching code; the fix for
+a missing write and the fix for a hidden read have nothing in common.
+
+---
+
+## 13. Pin every number a living doc asserts, not just the one that bit you
 
 **What happened.** Twice. In an earlier release the contract claimed 9 tools,
 the runbook advertised 99 tests and the README disagreed with both;
@@ -238,7 +267,7 @@ those files rather than a blind fix.
 
 ---
 
-## 13. Verify anything that arrives from outside
+## 14. Verify anything that arrives from outside
 
 **What happened.** A design handoff carried an in-memory demo backend reachable
 at `if (!TOKEN) return demoApi(...)`. It never fired in production, but for a

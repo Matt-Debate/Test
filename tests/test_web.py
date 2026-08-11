@@ -1976,7 +1976,10 @@ class ClassAddFormTests(unittest.TestCase):
                '  $("classesBody").addEventListener("click"')
     ENDPOINT = "classes-add"
 
-    def submit(self, fields: dict) -> dict:
+    def submit(self, fields: dict, response: dict | None = None) -> dict:
+        """`response` is what the server answers with — the add handler now
+        reads it back to build its confirmation, so a test that left it empty
+        could not tell an echo of the response from an echo of the form."""
         import json
 
         src = self.PORTAL.read_text(encoding="utf-8")
@@ -1997,9 +2000,11 @@ function toast(m) {{ toasts.push(String(m)); }}
 function refreshClasses() {{}}
 function api(name, body) {{
   sent = {{name: name, body: body}};
-  return {{then: function (f) {{ f({{}}); return this; }},
+  return {{then: function (f) {{ f({json.dumps(response or {})}); return this; }},
            catch: function () {{ return this; }}}};
 }}
+function money(n) {{ return "\\u00a5" + Number(n || 0).toFixed(2); }}
+function categoryLabel(e) {{ return e.category || ""; }}
 {block}
 handlerFn({{preventDefault: function () {{}}}});
 console.log(JSON.stringify({{sent: sent, toasts: toasts}}));
@@ -2047,7 +2052,9 @@ class ExpenseAddFormTests(ClassAddFormTests):
     submit handlers, and every field it sends lands in a total.
     """
 
-    HANDLER = ('  $("addForm").addEventListener("submit"',
+    # starts at addedMsg so the confirmation builder under test is the SHIPPING
+    # one, not a stub — it is the whole subject of the toast tests below
+    HANDLER = ("  function addedMsg(e) {",
                "  // ---- per-item actions ----")
     ENDPOINT = "submit"
 
@@ -2079,10 +2086,159 @@ class ExpenseAddFormTests(ClassAddFormTests):
         sent = self.submit(dict(self.A_ROW, amount="220.55"))["sent"]
         self.assertEqual(sent["body"]["amount"], 220.55)
 
+    STORED = {"ok": True, "expense": {
+        "id": "3dc9ed78d440", "date": "2026-09-30", "amount": 1980.0,
+        "description": "football （10月）", "category": "aden-sports",
+        "paid": False,
+    }}
+
+    def test_the_confirmation_names_the_row_the_server_stored(self):
+        """She added the same ¥1,980 course twice because "已添加" flashed for
+        1.7s over a list that did not move. The confirmation has to say what
+        landed — and say it from the RESPONSE, so a value the server normalised
+        is confirmed as stored rather than as typed (LESSONS §5)."""
+        toast = self.submit(dict(self.A_ROW), response=self.STORED)["toasts"][0]
+        self.assertIn("football （10月）", toast)
+        self.assertIn("2026-09-30", toast)
+        self.assertIn("1980", toast.replace(",", ""))
+
+    def test_the_confirmation_does_not_echo_the_form(self):
+        """The discriminating case: she typed one date and amount, the server
+        stored another. A confirmation built from the form fields is a
+        confirmation of a write that did not happen that way — and it would
+        pass every assertion above."""
+        typed = dict(self.A_ROW, date="2026-08-20", amount="2200",
+                     desc="typed description")
+        toast = self.submit(typed, response=self.STORED)["toasts"][0]
+        self.assertNotIn("2026-08-20", toast)
+        self.assertNotIn("2200", toast.replace(",", ""))
+        self.assertNotIn("typed description", toast)
+
+    def test_a_response_without_a_row_still_confirms(self):
+        """Degrade to the old one-word toast rather than printing "undefined"
+        across her ledger if the response shape ever changes."""
+        toast = self.submit(dict(self.A_ROW), response={"ok": True})["toasts"][0]
+        self.assertEqual(toast, "added")
+
     # not applicable — this form has no payment selector
     test_the_period_label_reaches_the_server_when_the_kind_uses_one = None
     test_the_class_count_is_sent_as_the_number_she_typed = None
     test_no_payment_selected_sends_nothing = None
+
+
+@unittest.skipUnless(shutil.which("node"), "node not available to run the portal's JS")
+class DueTabVisibilityTests(unittest.TestCase):
+    """Every unpaid row must be VISIBLE on the tab she adds from.
+
+    The Due tab has rendered only `daysBetween(today, date) <= 30` since the
+    v0.6.0 redesign, and no test ever executed `renderNow`. It went unnoticed
+    while rows were near-term. On 2026-08-11 she entered five months of course
+    fees at once; the first row due in 50 days appeared in no list and no card,
+    the success toast was a 1.7s flash of a constant, and the page underneath
+    did not move — so she added the same ¥1,980 course a second time. Both rows
+    are in production.
+
+    The sweep is the point. A test that asserts "the Later section exists"
+    passes on a section rendered with the wrong predicate, or on one nothing
+    puts rows into (LESSONS §8); this one fails unless every row in a 460-day
+    span actually reaches the markup.
+    """
+
+    PORTAL = Path(__file__).resolve().parent.parent / "app" / "portal.html"
+    TODAY = "2026-08-11"
+
+    def render_now(self, rows: list) -> str:
+        """Run the portal's real renderNow() over `rows`; return #nowBody.
+
+        Deliberately takes the block from `var CATS` so esc(), money(),
+        daysBetween(), isBorrow(), categoryLabel() and stateOf() are the
+        SHIPPING ones. Stubbing them is how a renderer bug hides: a permissive
+        stub is a test that cannot fail (LESSONS §3).
+        """
+        import json
+
+        src = self.PORTAL.read_text(encoding="utf-8")
+        block = src[src.index("  var CATS = ["):src.index("  // ---- tab 3: stats ----")]
+        for marker in ("function renderNow", "function stateOf", "function esc"):
+            self.assertIn(marker, block, "block markers moved")
+        script = f"""
+var _nodes = {{}}, localStorage = {{getItem: function () {{ return "zh"; }}}};
+var document = {{
+  getElementById: function (id) {{
+    if (!_nodes[id]) _nodes[id] = {{innerHTML: "", addEventListener: function () {{}}}};
+    return _nodes[id];
+  }},
+  addEventListener: function () {{}},
+}};
+{block}
+expenses = {json.dumps(rows)};
+serverToday = {json.dumps(self.TODAY)};
+serverTodayAt = Date.now();
+serverMidnightIn = 43200;
+renderNow();
+console.log(JSON.stringify(_nodes.nowBody.innerHTML));
+"""
+        out = subprocess.run(["node", "-e", script], capture_output=True,
+                             text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        import json as _json
+
+        return _json.loads(out.stdout)
+
+    def a_sweep(self) -> list:
+        """One unpaid row per day-offset across a 460-day span.
+
+        Amounts are distinct and non-round so a row cannot be confused with its
+        neighbour, and the span deliberately runs past the 30-day window on both
+        sides — the boundary is the whole subject.
+        """
+        from datetime import datetime, timedelta
+
+        base = datetime.strptime(self.TODAY, "%Y-%m-%d")
+        rows = []
+        for i, offset in enumerate(range(-60, 400)):
+            rows.append({
+                "id": f"row{i:04d}",
+                "date": (base + timedelta(days=offset)).strftime("%Y-%m-%d"),
+                "amount": 100 + i + 0.37,
+                "category": "aden-sports",
+                "description": f"row {i} at {offset:+d}d",
+                "paid": False, "paid_date": None,
+            })
+        return rows
+
+    def test_no_unpaid_row_is_invisible_on_the_due_tab(self):
+        rows = self.a_sweep()
+        html = self.render_now(rows)
+        missing = [r["id"] for r in rows if f'data-id="{r["id"]}"' not in html]
+        self.assertEqual(
+            missing, [],
+            f"{len(missing)} of {len(rows)} unpaid rows render nowhere on the "
+            f"Due tab — she cannot see what she just added. First few: "
+            f"{missing[:5]}",
+        )
+
+    def test_the_row_she_actually_added_is_on_the_due_tab(self):
+        """The production case, by id and description. 2026-09-30 is 50 days
+        after 2026-08-11: outside the 30-day window that hid it."""
+        html = self.render_now([{
+            "id": "3dc9ed78d440", "date": "2026-09-30", "amount": 1980,
+            "category": "aden-sports", "description": "football （10月）",
+            "paid": False, "paid_date": None,
+        }])
+        self.assertIn('data-id="3dc9ed78d440"', html)
+        self.assertIn("football", html)
+
+    def test_a_borrow_row_stays_in_its_own_section(self):
+        """P4: money she fronted is never household spending. Surfacing the
+        far-future rows must not sweep borrow into the due list."""
+        html = self.render_now([{
+            "id": "lent1", "date": "2027-01-01", "amount": 500,
+            "category": "borrow", "description": "fronted it",
+            "paid": False, "paid_date": None,
+        }])
+        self.assertIn('data-id="lent1"', html)
+        self.assertIn("st lend", html, "a borrow row lost its lent styling")
 
 
 class ClassKindParityTests(unittest.TestCase):

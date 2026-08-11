@@ -187,11 +187,19 @@ One mobile-first page, bilingual **中文 (default) / English**, four tabs:
 The nav order is Due · Classes · History · Stats.
 
 - **Due** — summary cards (due now · paid this month · upcoming within 30 days ·
-  owed back to her), collapsible add form, what is due in the next 30 days, then
-  what was paid this month.
+  owed back to her), collapsible add form, then the unpaid rows. **Since
+  v0.12.0 those are a partition of one list, not a filter:** `待付 · 未来30天`
+  and `待付 · 30天以后`, both rendered expanded, so no unpaid row is invisible
+  here. Owed-back-to-her keeps its own section, and what was paid this month
+  closes the tab. The 30-day horizon on the summary *cards* is unchanged and
+  deliberate (`Store.summarize`). Adding a row confirms with the description,
+  due date and amount **the server stored**, read from the response.
+  `DueTabVisibilityTests` sweeps today−60 … today+400 and fails if any unpaid
+  row reaches no section.
 - **History** — a statement: one row per month (txns · paid · outstanding), most
   recent first, tap to expand into that month's items. Scheduled future months
-  sit in their own group below.
+  sit in their own group below, and since v0.12.0 carry the same `aria-expanded`
+  and open state as a past month — the two branches had drifted.
 - **Classes** — prepaid courses. A per-class pack shows classes and money
   remaining; a monthly/semester fee shows what is owed back, split into
   reclaimable and forfeited. Tap a course for its class log. Its payload is
