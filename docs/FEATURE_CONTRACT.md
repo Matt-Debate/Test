@@ -1,7 +1,7 @@
 # Feature Contract — Family Expenses
 
-**Status:** ACTIVE (v0.11.0 deployed as `family-expenses-00014-zm5` —
-in daily household use since 2026-08-11)
+**Status:** ACTIVE (v0.13.0 deployed 2026-09-05 as `family-expenses-00015-njh`,
+carrying v0.12.0 with it — in daily household use since 2026-08-11)
 **Owner:** matt-debate
 **Repo:** `Matt-Debate/family-expenses`
 **Default branch:** `main`

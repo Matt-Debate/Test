@@ -24,6 +24,17 @@ Cut as a **minor**: five new tools, a new table, the first in-place
 constraint change, and a portal she will see change. Nothing in §5.1 moves —
 same service, same `/t/<token>`, same open `/mcp`.
 
+**Deployed 2026-09-05** as `family-expenses-00015-njh` (carrying v0.12.0,
+which had never left this machine). The startup migration applied on Neon with
+nothing rejected; `smoke_live.py` passed end to end, refund and undo included.
+**Production repair, the same day, through the deployed tools:** the rebuilt
+row `70b8cd36dba8` was raised back to its gross ¥3,600 and refund
+`3e46a5a36c6a` of ¥1,800 recorded against it dated 2026-09-05, so the ledger
+now says what happened — ¥3,600 paid on 2026-08-15, ¥1,800 back on
+2026-09-05 — with the effective amount unchanged at ¥1,800 and the pack five
+classes at ¥360. The original row's event ids, deleted by hand that morning,
+are gone for good; its history survives under the old id.
+
 ### Added
 - **Refunds, as their own fact.** `expense_refunds` holds amount, date,
   reason and author against a paid row; the row keeps its amount and dates.
