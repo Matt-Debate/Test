@@ -79,8 +79,14 @@ database is done by `Database._migrate_history_actions()` at startup.
 
 ### `expense_refunds` (v0.13.0)
 `id` PK, `expense_id` FK → `expenses` ON DELETE CASCADE, `amount` CHECK > 0,
-`date`, `reason`, `changed_by`, `created_at`. **Money that came back on a paid
-row, as its own dated fact.** The payment keeps its amount and dates; the
+`date`, `reason`, `changed_by`, `created_at`, and since v0.13.1 `package_id`,
+`class_count_before`, `class_count_after` (NULL unless the refund resized the
+funded course; added to a live table by `Database._migrate_refund_columns`).
+**Money that came back on a paid row, as its own dated fact.** A refund that
+resized a course is one decision with the resize, so **deleting it restores
+the previous class count** — unless the count was changed since, in which
+case the later change stands and the result says so; reverting an upward
+resize runs under the shrink rule. The payment keeps its amount and dates; the
 refund cannot exceed what is left; an unpaid row cannot be refunded (that is a
 price change, `update`); a `borrow` row cannot be refunded (a repayment is
 `mark_paid`; a partial one has no primitive — `docs/BACKLOG.md` §11); and a

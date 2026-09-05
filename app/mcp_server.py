@@ -76,7 +76,8 @@ INTENT → TOOL:
   call so the per-class rate stays honest (¥3600 for 10 refunded ¥1800 is
   5 classes at ¥360, not 10 at ¥180)
 - "那个退款记错了 / undo the refund" → expenses_refund_delete(refund_id=…) —
-  confirm first
+  confirm first. A course resized with the refund goes back to its previous
+  class count too (unless something changed it since — the note says)
 - "课时改成5 / 改成5节 / the pack is 5 classes now / rename the course /
   改名" → classes_update(query=…, class_count=5)
 - "这个课结束了 / 上完了 / archive the course / retire it" →
@@ -515,19 +516,41 @@ def build_mcp(store: Store) -> FastMCP:
         """Take back a refund that was recorded by mistake ('那个退款记错了',
         'undo the refund', 'they did not actually refund it') — confirm with
         the user first. The refund row is removed and kept in the history;
-        the expense's effective amount goes back up. refund_id comes from the
-        expenses_refund result, from .refunds on an expenses_list row, or from
-        expenses_history (action 'refund'). A course resized alongside the
-        refund is NOT resized back — use classes_update for that."""
-        expense = store.delete_refund(refund_id, changed_by=changed_by)
-        if expense is None:
+        the expense's effective amount goes back up. If the refund resized
+        the course (resize_package_to), the course goes back to the class
+        count it had before — the two were one decision — unless something
+        changed the count since, in which case it is left alone and the note
+        says so. refund_id comes from the expenses_refund result, from
+        .refunds on an expenses_list row, or from expenses_history (action
+        'refund'). Read the note for what happened to the course."""
+        outcome = store.delete_refund(refund_id, changed_by=changed_by)
+        if outcome is None:
             raise ValidationError(
                 f"no refund with id {refund_id!r} — refund ids are in "
                 "expenses_history (action 'refund') and on each row's .refunds "
                 "in expenses_list"
             )
+        expense = outcome["expense"]
         result = expense.to_dict()
-        result["note"] = "refund removed · " + _refund_note(expense)
+        note = "refund removed · " + _refund_note(expense)
+        package = outcome["package"]
+        if package is not None:
+            result["package"] = {k: v for k, v in package.items() if k != "payload"}
+            if package.get("restored"):
+                s = package["payload"]["summary"]
+                note += (
+                    f" · {package['name']} restored to {s['class_count']} classes "
+                    f"at ¥{s['rate']:.2f} each (the refund had set it to "
+                    f"{package['class_count_after']})"
+                )
+            else:
+                note += (
+                    f" · {package.get('name') or 'the course'} left at "
+                    f"{package.get('class_count', '?')} classes — {package['reason']}"
+                    + ("; classes_update(class_count=…) if that is wrong"
+                       if package.get("class_count") is not None else "")
+                )
+        result["note"] = note
         return result
 
     # ── class tracker ─────────────────────────────────────────────────────

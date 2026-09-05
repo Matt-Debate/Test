@@ -7,6 +7,40 @@ to a release entry when a chunk set ships.
 
 Nothing pending.
 
+## [0.13.1] — 2026-09-05
+
+Found by the owner's live smoke session the same afternoon, through the
+assistant: `expenses_refund_delete` undid the money and not the resize.
+¥1,000 for ten, refunded ¥500 and resized to five (still ¥100 a class), then
+undone: gross ¥1,000, refund gone — and the pack still five classes, now
+**¥200 a class**, a figure stored nowhere and chosen by nobody. The docstring
+had called that deliberate. It was a bug in the model: `resize_package_to`
+exists so the refund and the resize are one decision, and an undo that
+reverses half of one decision is not an undo.
+
+### Fixed
+- **Deleting a refund now reverses the whole decision.** A refund that
+  resized the funded course records the course and the class count before
+  and after (`package_id`, `class_count_before`, `class_count_after` on
+  `expense_refunds` — on the refund event itself, so it shows in
+  `expenses_history`, not in a side table). Deleting the refund puts the
+  count back in the same transaction through the ordinary package update,
+  which writes its own `package_update` row with the author. Guarded: if
+  anything changed the count since (a `classes_update`, a later refund) it
+  is left alone; reverting an *upward* resize is a shrink and runs under the
+  shrink rule, and if logged classes block it the count stays. Every outcome
+  is said in the tool's note, her undo toast (课时恢复为 / 课时保持), and the
+  `refund_delete` snapshot. Two regression tests mirror the reproduction:
+  refund with resize, delete, assert ten classes at ¥100 again; and the
+  same with a `classes_update` in between, asserting the guard leaves it.
+- **The second in-place migration.** `expense_refunds` shipped this morning
+  without those columns and `CREATE TABLE IF NOT EXISTS` cannot add them, so
+  `Database._migrate_refund_columns()` adds each missing one at startup —
+  inspection-driven, idempotent, best-effort with a loud warning, same
+  posture as the action-constraint migration — and `smoke_live.py` gates on
+  it. Production holds one refund row today, unresized, which reads as
+  before.
+
 ## [0.13.0] — 2026-09-05
 
 A day of live use found the class tracker could not express a refund. A

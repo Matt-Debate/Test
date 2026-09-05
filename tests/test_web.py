@@ -3014,10 +3014,34 @@ class RefundApiTests(unittest.TestCase):
         r = self.post("refund-delete", refund_id=rid)
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["expense"]["amount"], 3600.0)
+        self.assertIsNone(r.json()["package"])
         self.assertEqual(self.post("refund-delete", refund_id=rid).status_code, 404)
         hist = self.post("history", id=eid).json()["history"]
         self.assertEqual(hist[-1]["action"], "refund_delete")
         self.assertEqual(hist[-1]["changed_by"], self.label)
+
+    def test_undoing_a_resizing_refund_over_http_reports_the_course(self):
+        eid = self.paid(amount=1000)
+        pid = self.post("classes-add", expense_id=eid, name="c", kind="per_class",
+                        class_count=10).json()["package"]["id"]
+        rid = self.post("refund", id=eid, amount=500, resize_package_to=5).json()["refund"]["id"]
+        r = self.post("refund-delete", refund_id=rid)
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["package"]["restored"], True)
+        self.assertEqual(body["package"]["class_count"], 10)
+        self.assertNotIn("payload", body["package"])
+        listed = self.post("classes-list").json()["packages"][0]
+        self.assertEqual((listed["class_count"], listed["summary"]["rate"]), (10, 100.0))
+        hist = self.post("history", id=eid).json()["history"]
+        self.assertEqual([h["action"] for h in hist][-2:], ["package_update", "refund_delete"])
+        self.assertEqual(hist[-2]["changed_by"], self.label)
+        # changed since → left, with the reason
+        rid2 = self.post("refund", id=eid, amount=100, resize_package_to=5).json()["refund"]["id"]
+        self.post("classes-update", id=pid, fields={"class_count": 8})
+        body = self.post("refund-delete", refund_id=rid2).json()
+        self.assertEqual((body["package"]["restored"], body["package"]["class_count"]), (False, 8))
+        self.assertIn("changed to 8", body["package"]["reason"])
 
     def test_the_list_says_which_course_a_payment_funds(self):
         eid = self.paid()
@@ -3606,6 +3630,18 @@ console.log(JSON.stringify({{apiCalls: apiCalls, toasts: toasts, confirms: confi
         self.assertEqual(out["refreshes"], 1)
         declined = self.run_handler(undo + 'handlerFn(makeEv(null, x));', confirmed=False)
         self.assertEqual(declined["apiCalls"], [])
+        # the undo says what it did to a course the refund had resized —
+        # from the server's answer, restored or left
+        restored = self.run_handler(undo + 'handlerFn(makeEv(null, x));',
+                                    response={"ok": True, "package": {"restored": True, "class_count": 10}})
+        self.assertEqual(restored["toasts"], ["refund_removed · cls_count_restored 10cls_cls"])
+        left = self.run_handler(undo + 'handlerFn(makeEv(null, x));',
+                                response={"ok": True, "package": {"restored": False, "class_count": 7,
+                                                                  "reason": "changed since"}})
+        self.assertEqual(left["toasts"], ["refund_removed · cls_count_left 7cls_cls"])
+        none = self.run_handler(undo + 'handlerFn(makeEv(null, x));',
+                                response={"ok": True, "package": None})
+        self.assertEqual(none["toasts"], ["refund_removed"])
 
 
 @unittest.skipUnless(shutil.which("node"), "node not available to run the portal's JS")

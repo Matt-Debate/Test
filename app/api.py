@@ -193,12 +193,19 @@ def api_refund(store: Store, body: dict) -> tuple[int, dict]:
 
 @_guard
 def api_refund_delete(store: Store, body: dict) -> tuple[int, dict]:
-    expense = store.delete_refund(
+    result = store.delete_refund(
         str(body.get("refund_id")), changed_by=_author(body, "changed_by")
     )
-    if expense is None:
+    if result is None:
         raise NotFoundError(body.get("refund_id"))
-    return 200, {"ok": True, "expense": expense.to_dict()}
+    package = result["package"]
+    return 200, {
+        "ok": True,
+        "expense": result["expense"].to_dict(),
+        # what the undo did to the course — restored, or left and why — so
+        # the confirmation can say so; the payload itself is not needed here
+        "package": {k: v for k, v in package.items() if k != "payload"} if package else None,
+    }
 
 
 @_guard

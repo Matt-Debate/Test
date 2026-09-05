@@ -888,6 +888,42 @@ class RefundAndCourseToolTests(unittest.TestCase):
         both = self.call("expenses_list", query="badminton", until="2026-08-31")
         self.assertEqual([e["date"] for e in both["expenses"]], ["2026-08-15"])
 
+    def test_undoing_a_resizing_refund_says_what_happened_to_the_course(self):
+        """The live smoke session's finding: the undo reversed the money and
+        left the pack at a rate nobody chose, and the note said nothing."""
+        e = self.call("expenses_add", amount="1000", description="ZZTEST refund harness",
+                      category="other", paid=True)
+        p = self.call("classes_add", name="ZZTEST course", class_count=10, query="ZZTEST")
+        self.call("classes_log", kind="attended", query="ZZTEST",
+                  dates=["2026-09-01", "2026-09-02"])
+        r = self.call("expenses_refund", query="ZZTEST", amount=500, resize_package_to=5)
+        self.assertEqual(r["package"]["summary"]["rate"], 100.0)
+        back = self.call("expenses_refund_delete", refund_id=r["refund"]["id"])
+        self.assertEqual(back["amount"], 1000.0)
+        self.assertTrue(back["package"]["restored"])
+        self.assertIn("restored to 10 classes at ¥100.00 each", back["note"])
+        self.assertIn("had set it to 5", back["note"])
+        listed = self.call("classes_list")["packages"][0]
+        self.assertEqual((listed["class_count"], listed["summary"]["rate"]), (10, 100.0))
+        # the guarded case is said out loud too
+        r2 = self.call("expenses_refund", expense_id=e["id"], amount=200, resize_package_to=5)
+        self.call("classes_update", package_id=p["id"], class_count=7)
+        left = self.call("expenses_refund_delete", refund_id=r2["refund"]["id"])
+        self.assertFalse(left["package"]["restored"])
+        self.assertIn("left at 7 classes", left["note"])
+        self.assertIn("changed to 7", left["note"])
+        self.assertIn("classes_update", left["note"])
+        # and a refund that resized nothing keeps the old, shorter note
+        r3 = self.call("expenses_refund", expense_id=e["id"], amount=1)
+        plain = self.call("expenses_refund_delete", refund_id=r3["refund"]["id"])
+        self.assertNotIn("package", plain)
+        self.assertNotIn("classes", plain["note"])
+        desc = {t.name: " ".join((t.description or "").split())
+                for t in run(self.mcp.list_tools())}
+        self.assertIn("class count it had before", desc["expenses_refund_delete"])
+        self.assertNotIn("NOT resized back", desc["expenses_refund_delete"])
+        self.assertIn("previous class count", " ".join(self.call("expenses_help").split()))
+
     def test_a_refund_on_an_unpaid_row_coaches_at_the_boundary(self):
         from mcp.server.fastmcp.exceptions import ToolError
         self.call("expenses_add", amount="300", description="足球课")

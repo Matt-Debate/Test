@@ -249,13 +249,95 @@ class RefundStoreTests(unittest.TestCase):
     def test_deleting_a_refund_restores_the_row_and_keeps_the_record(self):
         e = self.paid()
         rid = self.store.refund(e.id, amount=1800, reason="half back")["refund"]["id"]
-        x = self.store.delete_refund(rid, changed_by="Matt")
+        out = self.store.delete_refund(rid, changed_by="Matt")
+        x = out["expense"]
         self.assertEqual((x.amount, x.refunded, x.refunds), (3600.0, 0.0, []))
+        self.assertIsNone(out["package"], "no course was resized, so nothing to say")
         last = self.store.history(e.id)[-1]
         self.assertEqual(last.action, "refund_delete")
         self.assertEqual(last.snapshot["refund"]["id"], rid)
         self.assertEqual(last.snapshot["refund"]["reason"], "half back")
+        self.assertNotIn("package", last.snapshot)
         self.assertIsNone(self.store.delete_refund(rid))  # gone means gone
+
+    def test_deleting_a_refund_that_resized_the_course_puts_the_count_back(self):
+        """The reproduction from the live smoke session: ¥1,000 for ten, two
+        attended, refund ¥500 resized to 5 (still ¥100 a class), undo → the
+        pack sat at 5 classes over ¥1,000, ¥200 a class, a rate nobody chose.
+        The refund and the resize are one decision; the undo reverses both."""
+        e = self.paid(amount=1000, description="ZZTEST refund harness")
+        p = self.pack(e, count=10, name="ZZTEST course")
+        self.store.log_class(package_id=p["id"], kind="attended",
+                             dates=["2026-09-01", "2026-09-02"])
+        out = self.store.refund(e.id, amount=500, resize_package_to=5, reason="test")
+        rid = out["refund"]["id"]
+        self.assertEqual((out["refund"]["package_id"], out["refund"]["class_count_before"],
+                          out["refund"]["class_count_after"]), (p["id"], 10, 5))
+        self.assertEqual(out["package"]["summary"]["rate"], 100.0)
+        undone = self.store.delete_refund(rid, changed_by="Matt")
+        self.assertEqual(undone["expense"].amount, 1000.0)
+        self.assertTrue(undone["package"]["restored"])
+        self.assertEqual(undone["package"]["class_count"], 10)
+        s = self.store.package(p["id"])["summary"]
+        self.assertEqual((s["class_count"], s["rate"], s["attended"], s["remaining"]),
+                         (10, 100.0, 2, 8))
+        # both halves of the undo are on the trail, with the author
+        trail = self.store.history(e.id)
+        self.assertEqual([h.action for h in trail][-2:], ["package_update", "refund_delete"])
+        self.assertEqual(trail[-2].snapshot["changed"], {"class_count": 10})
+        self.assertEqual(trail[-2].changed_by, "Matt")
+        self.assertEqual(trail[-1].snapshot["package"]["restored"], True)
+        self.assertEqual(trail[-1].snapshot["refund"]["class_count_before"], 10)
+
+    def test_the_undo_leaves_a_count_that_was_changed_since_the_refund(self):
+        """A later classes_update is a later decision; the undo must not
+        clobber it — and must say so."""
+        e = self.paid(amount=1000)
+        p = self.pack(e, count=10)
+        rid = self.store.refund(e.id, amount=500, resize_package_to=5)["refund"]["id"]
+        self.store.update_package(p["id"], fields={"class_count": 7})
+        undone = self.store.delete_refund(rid)
+        self.assertFalse(undone["package"]["restored"])
+        self.assertEqual(undone["package"]["class_count"], 7)
+        self.assertIn("changed to 7", undone["package"]["reason"])
+        self.assertEqual(self.store.package(p["id"])["class_count"], 7)
+        self.assertNotIn("package_update",
+                         [h.action for h in self.store.history(e.id)][-1:])
+        # a second refund that resized again is the same situation
+        rid2 = self.store.refund(e.id, amount=100, resize_package_to=4)["refund"]["id"]
+        self.store.refund(e.id, amount=100, resize_package_to=3)
+        self.assertFalse(self.store.delete_refund(rid2)["package"]["restored"])
+        self.assertEqual(self.store.package(p["id"])["class_count"], 3)
+
+    def test_reverting_an_upward_resize_runs_under_the_shrink_rule(self):
+        """A refund can resize UP; undoing that is a shrink. If classes were
+        logged beyond the old count meanwhile, the count stays and the reason
+        is the shrink rule's own words."""
+        e = self.paid(amount=1000)
+        p = self.pack(e, count=3)
+        rid = self.store.refund(e.id, amount=100, resize_package_to=6)["refund"]["id"]
+        self.store.log_class(package_id=p["id"], kind="attended",
+                             dates=["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04"])
+        undone = self.store.delete_refund(rid)
+        self.assertFalse(undone["package"]["restored"])
+        self.assertIn("classes_log_delete", undone["package"]["reason"])
+        self.assertEqual(self.store.package(p["id"])["class_count"], 6)
+        self.assertEqual(self.store.list()[0].amount, 1000.0)   # the money half still undone
+        # …and without the extra classes it goes back down
+        e2 = self.paid(amount=1000, description="other")
+        p2 = self.pack(e2, count=3, name="other")
+        rid2 = self.store.refund(e2.id, amount=100, resize_package_to=6)["refund"]["id"]
+        self.assertTrue(self.store.delete_refund(rid2)["package"]["restored"])
+        self.assertEqual(self.store.package(p2["id"])["class_count"], 3)
+
+    def test_a_refund_that_resized_to_the_same_count_has_nothing_to_restore(self):
+        e = self.paid(amount=1000)
+        p = self.pack(e, count=10)
+        rid = self.store.refund(e.id, amount=100, resize_package_to=10)["refund"]["id"]
+        undone = self.store.delete_refund(rid)
+        self.assertFalse(undone["package"]["restored"])
+        self.assertIn("did not change", undone["package"]["reason"])
+        self.assertEqual(self.store.package(p["id"])["class_count"], 10)
 
     def test_deleting_an_expense_snapshots_its_refunds_and_removes_them(self):
         e = self.paid()
@@ -718,6 +800,36 @@ class HistoryActionsTests(unittest.TestCase):
         with db.tx() as tx:
             self.assertEqual(tx.query("SELECT id FROM expense_refunds"), [])
         self.assertEqual(store.list()[0].amount, 3600.0)
+
+    def test_the_refund_columns_are_added_to_a_table_that_shipped_without_them(self):
+        """v0.13.0's expense_refunds had seven columns; v0.13.1 needs three
+        more, and CREATE TABLE IF NOT EXISTS cannot add them."""
+        path = old_database()
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            "CREATE TABLE expense_refunds (id TEXT PRIMARY KEY, expense_id TEXT NOT NULL "
+            "REFERENCES expenses(id) ON DELETE CASCADE, amount REAL NOT NULL CHECK (amount > 0), "
+            "date TEXT NOT NULL, reason TEXT, changed_by TEXT, created_at TEXT NOT NULL);"
+            "INSERT INTO expense_refunds VALUES ('r0', 'e1', 100, '2026-09-01', NULL, NULL, 't');"
+        )
+        conn.close()
+        db = Database(f"sqlite:///{path}")
+        self.assertEqual(db.refund_columns_missing(),
+                         ["package_id", "class_count_before", "class_count_after"])
+        db.init()
+        self.assertEqual(db.refund_columns_missing(), [])
+        db.init()   # idempotent
+        store = Store(db)
+        row = store.list()[0]
+        self.assertEqual(row.refunds[0]["package_id"], None)   # the old row reads as unresized
+        self.assertEqual(row.amount, 3500.0)
+        # and a resize through the migrated table records both counts
+        p = store.create_package(expense_id="e1", name="c", kind="per_class", class_count=10)
+        out = store.refund("e1", amount=100, resize_package_to=5)
+        self.assertEqual((out["refund"]["class_count_before"], out["refund"]["class_count_after"]),
+                         (10, 5))
+        self.assertTrue(store.delete_refund(out["refund"]["id"])["package"]["restored"])
+        self.assertEqual(store.package(p["id"])["class_count"], 10)
 
     def test_write_history_refuses_an_action_it_does_not_know(self):
         store = make_store()

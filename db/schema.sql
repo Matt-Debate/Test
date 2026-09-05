@@ -73,7 +73,16 @@ CREATE TABLE IF NOT EXISTS expense_refunds (
   date        TEXT NOT NULL,
   reason      TEXT,
   changed_by  TEXT,
-  created_at  TEXT NOT NULL
+  created_at  TEXT NOT NULL,
+  -- v0.13.1: a refund that resized the funded course records which course
+  -- and the class_count before and after, so deleting the refund can put
+  -- the count back — the refund and the resize are ONE decision, and an undo
+  -- that reversed half of it left a pack at a rate nobody chose. NULL when
+  -- no course was resized. Added to a live table by
+  -- Database._migrate_refund_columns (ADD COLUMN, inspection-driven).
+  package_id          TEXT,
+  class_count_before  INTEGER,
+  class_count_after   INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_expense_refunds_expense ON expense_refunds(expense_id);
 

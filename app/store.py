@@ -92,7 +92,10 @@ _EXPENSE_COLS = (
     "expenses.created_at AS created_at, expenses.updated_at AS updated_at, "
     f"{_refunded_sql('expenses')} AS refunded"
 )
-_REFUND_COLS = "id, expense_id, amount, date, reason, changed_by, created_at"
+_REFUND_COLS = (
+    "id, expense_id, amount, date, reason, changed_by, created_at, "
+    "package_id, class_count_before, class_count_after"
+)
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Canonical category list. `category` stays free text in the database (the MCP
@@ -424,11 +427,19 @@ class Store:
 
     @staticmethod
     def _refund_row(r: dict[str, Any]) -> dict[str, Any]:
+        def count(v):
+            return int(v) if v is not None else None
+
         return {
             "id": r["id"], "expense_id": r["expense_id"],
             "amount": round(float(r["amount"]), 2), "date": r["date"],
             "reason": r["reason"], "changed_by": r["changed_by"],
             "created_at": r["created_at"],
+            # the course this refund resized, and the count either side of
+            # it — what delete_refund needs to put the count back
+            "package_id": r.get("package_id"),
+            "class_count_before": count(r.get("class_count_before")),
+            "class_count_after": count(r.get("class_count_after")),
         }
 
     def _refunds_by_expense(self, tx, expense_ids=None) -> dict[str, list]:
@@ -788,22 +799,11 @@ class Store:
                     f"¥{left:.2f} (¥{expense.gross_amount:.2f} paid, "
                     f"¥{expense.refunded:.2f} already refunded). Check the figure."
                 )
-            refund_row = {
-                "id": generate_id(), "expense_id": expense_id, "amount": amount,
-                "date": date, "reason": reason, "changed_by": changed_by,
-                "created_at": _utc_now_iso(),
-            }
-            tx.execute(
-                f"INSERT INTO expense_refunds ({_REFUND_COLS}) VALUES "
-                "(:id, :expense_id, :amount, :date, :reason, :changed_by, :created_at)",
-                refund_row,
-            )
             linked = tx.query_one(
-                "SELECT id FROM class_packages WHERE expense_id = :id",
+                "SELECT id, class_count FROM class_packages WHERE expense_id = :id",
                 {"id": expense_id},
             )
-            package = None
-            resized = False
+            before = after = None
             if resize_package_to is not None:
                 if linked is None:
                     raise ValidationError(
@@ -811,9 +811,32 @@ class Store:
                         "on this payment — classes_list shows the courses; drop "
                         "the parameter to record the refund alone."
                     )
+                before = int(linked["class_count"])
+                after = self._validate_class_count(resize_package_to)
+            refund_row = {
+                "id": generate_id(), "expense_id": expense_id, "amount": amount,
+                "date": date, "reason": reason, "changed_by": changed_by,
+                "created_at": _utc_now_iso(),
+                # the refund and the resize are one decision, so the refund
+                # remembers the count either side of it: that is what lets
+                # delete_refund reverse the whole decision, not half of it
+                "package_id": linked["id"] if linked is not None else None,
+                "class_count_before": before, "class_count_after": after,
+            }
+            # the refund row goes in BEFORE the course is read or resized: the
+            # course's money is the effective amount, and a payload read
+            # ahead of the insert prices the classes on the gross figure
+            tx.execute(
+                f"INSERT INTO expense_refunds ({_REFUND_COLS}) VALUES "
+                "(:id, :expense_id, :amount, :date, :reason, :changed_by, :created_at, "
+                ":package_id, :class_count_before, :class_count_after)",
+                refund_row,
+            )
+            package = None
+            resized = False
+            if resize_package_to is not None:
                 package = self._update_package_in_tx(
-                    tx, linked["id"], {"class_count": resize_package_to},
-                    changed_by=changed_by,
+                    tx, linked["id"], {"class_count": after}, changed_by=changed_by,
                 )
                 resized = True
             elif linked is not None:
@@ -837,14 +860,20 @@ class Store:
 
     def delete_refund(
         self, refund_id: str, *, changed_by: Optional[str] = None
-    ) -> Optional[Expense]:
-        """Take back a mistaken refund. The row goes; history keeps it.
+    ) -> Optional[dict[str, Any]]:
+        """Take back a mistaken refund — the WHOLE decision, resize included.
 
-        Same shape as deleting an expense: a physical delete with the
-        pre-change record in the snapshot. Does NOT undo a course resize that
-        came with the refund — that is a separate fact about the course, and
-        classes_update puts it back. Returns the expense, or None if no such
-        refund exists.
+        A physical delete with the pre-change record in the snapshot, like
+        deleting an expense. If the refund resized the funded course, the
+        course goes back to the class_count it had before, in the same
+        transaction: the two were recorded as one decision, and undoing only
+        the money left a pack at a rate nobody chose (¥1,000 refunded ¥500
+        and resized 10 → 5 undid to ¥1,000 over 5, ¥200 a class). Guarded:
+        the count is restored only if it still reads what the refund set —
+        anything that changed it since (classes_update, another refund) is
+        left alone and said so. Reverting an UPWARD resize is a shrink and
+        runs under the shrink rule; if logged classes block it, the count
+        stays and the outcome says why. Returns None if no such refund.
         """
         with self.db.tx() as tx:
             row = tx.query_one(
@@ -853,14 +882,61 @@ class Store:
             )
             if row is None:
                 return None
+            self._lock_expense(tx, row["expense_id"])
             tx.execute("DELETE FROM expense_refunds WHERE id = :id", {"id": row["id"]})
+            refund = self._refund_row(row)
+            outcome = self._revert_resize_in_tx(tx, refund, changed_by=changed_by)
             expense = self._fetch_expense(tx, row["expense_id"])
             snapshot = expense.to_dict()
-            snapshot["refund"] = self._refund_row(row)
+            snapshot["refund"] = refund
+            if outcome is not None:
+                snapshot["package"] = {
+                    k: v for k, v in outcome.items() if k != "payload"
+                }
             self._write_history(
                 tx, row["expense_id"], "refund_delete", changed_by, snapshot
             )
-        return expense
+        return {"expense": expense, "refund": refund, "package": outcome}
+
+    def _revert_resize_in_tx(
+        self, tx, refund: dict[str, Any], *, changed_by: Optional[str]
+    ) -> Optional[dict[str, Any]]:
+        """Put a resized course back, if this refund resized it and nothing
+        else has touched the count since. Returns what happened to the
+        course (None when the refund resized nothing) so the caller can say
+        it — the note must cover the course, not only the money."""
+        before, after = refund["class_count_before"], refund["class_count_after"]
+        if refund["package_id"] is None or before is None or after is None:
+            return None
+        current = tx.query_one(
+            "SELECT id, name, class_count FROM class_packages WHERE id = :id",
+            {"id": refund["package_id"]},
+        )
+        if current is None:
+            return {"restored": False, "package_id": refund["package_id"],
+                    "reason": "the course no longer exists"}
+        now = int(current["class_count"])
+        base = {"package_id": current["id"], "name": current["name"],
+                "class_count_before": before, "class_count_after": after}
+        if now != after:
+            # someone changed it since (classes_update, another refund): that
+            # is a later decision, and this undo must not clobber it
+            return dict(base, restored=False, class_count=now,
+                        reason=f"class_count was changed to {now} after this "
+                               f"refund set it to {after}, so it was left alone")
+        if before == after:
+            return dict(base, restored=False, class_count=now,
+                        reason="the refund did not change the class count")
+        try:
+            payload = self._update_package_in_tx(
+                tx, current["id"], {"class_count": before}, changed_by=changed_by,
+            )
+        except ValidationError as exc:
+            # only reachable when the refund resized UPWARD and classes have
+            # been logged beyond the old count since — a shrink the rule
+            # refuses, before any SQL ran, so the transaction is intact
+            return dict(base, restored=False, class_count=now, reason=str(exc))
+        return dict(base, restored=True, class_count=before, payload=payload)
 
     # ── reads ─────────────────────────────────────────────────────────────
     def list(

@@ -325,6 +325,11 @@ def main() -> int:
     missing = store.db.history_actions_missing()
     check("expense_history accepts every action (v0.13.0 migration applied)",
           not missing, f"still rejected: {missing}")
+    # v0.13.1 added three columns to expense_refunds in place; without them
+    # every refund INSERT fails
+    gaps = store.db.refund_columns_missing()
+    check("expense_refunds has its resize columns (v0.13.1 migration applied)",
+          not gaps, f"missing: {gaps}")
 
     minted = store.mint_token(label="smoke-test")
     token = minted["token"]

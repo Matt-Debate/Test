@@ -349,6 +349,7 @@
       refund_confirm_undo:"删除这条退款记录？", refunded_toast:"已记录退款",
       refund_removed:"已删除退款", now_amt:"现", refund_after:"退款后",
       refund_count_low:"课时数不能少于已上的 {n} 节",
+      cls_count_restored:"课时恢复为", cls_count_left:"课时保持",
       refund_period_hint:"按月／学期的课：如果这笔退款是退还停课的费用，记录后请到课程页删除已退的停课记录，并把课时数改成剩下的节数，否则「欠我们」会一直算着它们",
       ev:{ attended:"上了", missed_school:"停课", missed_us:"没去" },
       sec_due:"待付 · 未来30天", sec_later:"待付 · 30天以后",
@@ -408,6 +409,7 @@
       refund_confirm_undo:"Delete this refund record?", refunded_toast:"Refund recorded",
       refund_removed:"Refund removed", now_amt:"now", refund_after:"after refund",
       refund_count_low:"Classes can't be fewer than the {n} already attended",
+      cls_count_restored:"classes back to", cls_count_left:"classes left at",
       refund_period_hint:"Term fee: if this refund settles cancelled classes, delete those class records on the Classes tab and set the class count to what remains, or \"owed to us\" keeps claiming them",
       ev:{ attended:"attended", missed_school:"cancelled", missed_us:"skipped" },
       sec_due:"Due · next 30 days", sec_later:"Due · beyond 30 days",
@@ -1635,7 +1637,16 @@
       ev.stopPropagation();
       if (!confirm(t("refund_confirm_undo") + "\n" + unrefund.getAttribute("data-when"))) return;
       api("refund-delete", {refund_id: unrefund.getAttribute("data-unrefund")})
-        .then(function () { toast(t("refund_removed")); refresh(); })
+        .then(function (j) {
+          // what the undo did to the course, from the server: a refund that
+          // resized the pack takes the resize back with it
+          var p = j && j.package;
+          toast(t("refund_removed") + (p && p.restored
+            ? " · " + t("cls_count_restored") + " " + p.class_count + t("cls_cls")
+            : (p && p.class_count != null
+                ? " · " + t("cls_count_left") + " " + p.class_count + t("cls_cls") : "")), 3200);
+          refresh();
+        })
         .catch(function (e) { toast(e.message); });
       return;
     }

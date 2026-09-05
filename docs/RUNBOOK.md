@@ -141,14 +141,18 @@ assistant asks which one — nothing is guessed silently.
   be run by hand (`ALTER TABLE expense_history DROP CONSTRAINT
   expense_history_action_check; ALTER TABLE expense_history ADD CONSTRAINT
   expense_history_action_check CHECK (action IN (…))` with the list from
-  `app/models.py HISTORY_ACTIONS`), then restart. Anything beyond that
-  should introduce dated migration files.
+  `app/models.py HISTORY_ACTIONS`), then restart. **A second one** (v0.13.1)
+  adds three nullable columns to `expense_refunds` with plain `ADD COLUMN`;
+  check it the same way with `Database().refund_columns_missing()` and, if
+  needed, `ALTER TABLE expense_refunds ADD COLUMN <name> <type>` for each
+  name it lists (`Database.REFUND_COLUMNS` has the types). Anything beyond
+  these should introduce dated migration files.
 
 ## 7. Local development
 
 ```bash
 pip install -r requirements.txt
-python3 -m unittest discover -s tests        # 491 tests, sqlite, no server
+python3 -m unittest discover -s tests        # 498 tests, sqlite, no server
 python3 scripts/mint_link.py --label dev     # local sqlite file
 python3 -m app.main                          # http://localhost:8080
 ```

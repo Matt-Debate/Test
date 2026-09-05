@@ -165,6 +165,7 @@ class Database:
                 conn.rollback()
                 raise
         self._migrate_history_actions()
+        self._migrate_refund_columns()
         failed = self._apply_hardening()
         if failed:
             # the constraint's whole value is turning silent corruption into a
@@ -286,6 +287,55 @@ class Database:
             print(
                 f"WARNING: expense_history action migration did not apply ({exc}); "
                 "refunds and class-tracker audit rows will be REFUSED until it does",
+                file=sys.stderr,
+            )
+
+    # columns added to expense_refunds after it first shipped (v0.13.1).
+    # CREATE TABLE IF NOT EXISTS cannot add a column to a table that exists.
+    REFUND_COLUMNS = (
+        ("package_id", "TEXT"),
+        ("class_count_before", "INTEGER"),
+        ("class_count_after", "INTEGER"),
+    )
+
+    def refund_columns_missing(self) -> list[str]:
+        """The REFUND_COLUMNS the live expense_refunds table does not have."""
+        with self.tx() as tx:
+            if self.is_pg:
+                rows = tx.query(
+                    "SELECT column_name AS name FROM information_schema.columns "
+                    "WHERE table_name = 'expense_refunds'"
+                )
+            else:
+                rows = tx.query("PRAGMA table_info(expense_refunds)")
+        present = {r["name"] for r in rows}
+        if not present:
+            return []  # no table yet: schema.sql creates it complete
+        return [c for c, _t in self.REFUND_COLUMNS if c not in present]
+
+    def _migrate_refund_columns(self) -> None:
+        """ADD COLUMN each of REFUND_COLUMNS the live table lacks, once.
+
+        Same posture as _migrate_history_actions: inspection-driven so it is
+        idempotent, best-effort so a live portal boots, and loud in the log
+        if it did not apply. Both drivers support plain ADD COLUMN with a
+        nullable column, so no rebuild is needed.
+        """
+        import sys
+
+        try:
+            missing = self.refund_columns_missing()
+            for col, ctype in self.REFUND_COLUMNS:
+                if col in missing:
+                    with self.tx() as tx:
+                        tx.execute(f"ALTER TABLE expense_refunds ADD COLUMN {col} {ctype}")
+            still = self.refund_columns_missing()
+            if still:
+                raise RuntimeError(f"columns still missing: {still}")
+        except Exception as exc:
+            print(
+                f"WARNING: expense_refunds column migration did not apply ({exc}); "
+                "refunds will be REFUSED until it does",
                 file=sys.stderr,
             )
 
