@@ -200,8 +200,12 @@ async def exercise_public_mcp(base: str) -> None:
                     "expenses_update", {"expense_id": chinese["id"], "amount": "14.25块"}
                 ))
                 assert corrected["amount"] == 14.25
+                # the smoke's OWN row, by its tag: a bare 足球课 also matches
+                # the household's real football rows, and with one of those
+                # unpaid the resolver returns candidates instead of acting —
+                # which read as a KeyError, and left this row behind
                 paid = _tool_payload(await session.call_tool(
-                    "expenses_mark_paid", {"query": "足球课"}
+                    "expenses_mark_paid", {"query": "smoke-mcp] 足球课"}
                 ))
                 assert paid["id"] == chinese["id"] and paid["paid"]
                 history = _tool_payload(await session.call_tool(
@@ -388,28 +392,50 @@ def main() -> int:
             check("initialize, %d tools, 3 prompts, bilingual writes/reads/cleanup"
             % len(EXPECTED_MCP_TOOLS), True)
         except Exception as exc:
+            # the cause, not only its type: an ExceptionGroup from the MCP
+            # client says nothing on its own, and a run that failed here on
+            # 2026-09-05 could not be diagnosed from its output
+            import traceback
+
             check("public MCP gate", False, f"{type(exc).__name__}: {exc}")
+            for line in traceback.format_exception(exc)[-6:]:
+                print("    " + line.rstrip())
     finally:
         print("5. Cleanup")
-        # packages first: a payment that funds one cannot be deleted, so the
-        # expense sweep below would refuse the course row and leave both behind
-        for package in store.list_packages(include_archived=True):
-            if str(package["name"] or "").startswith("[smoke"):
+        # Every step guarded on its own, and the revoke in a finally of its
+        # own: a run on 2026-09-05 failed, then failed AGAIN inside this
+        # block before reaching the revoke, and left a never-expiring smoke
+        # token live in production and an unpaid '[smoke-mcp]' row in her
+        # 待付 tab. Cleanup must not have a step whose failure skips the rest.
+        try:
+            # packages first: a payment that funds one cannot be deleted, so
+            # the expense sweep below would refuse the course row and leave
+            # both behind
+            for package in store.list_packages(include_archived=True):
+                if str(package["name"] or "").startswith("[smoke"):
+                    try:
+                        store.delete_package(package["id"])
+                    except Exception as exc:
+                        print(f"  ! could not delete smoke class package ({exc}) — remove it manually")
+            if eid:
                 try:
-                    store.delete_package(package["id"])
-                except Exception:
-                    print("  ! could not delete smoke class package — remove it manually")
-        if eid:
+                    post(base, "delete", token=token, id=eid, changed_by="smoke")
+                except Exception as exc:
+                    print(f"  ! could not delete smoke expense ({exc}) — remove '[smoke]' row manually")
+            for expense in store.find("smoke-mcp"):
+                try:
+                    store.delete(expense.id, changed_by="smoke-cleanup")
+                except Exception as exc:
+                    print(f"  ! could not delete MCP smoke expense ({exc}) — remove it manually")
+        except Exception as exc:
+            print(f"  ! cleanup sweep failed ({type(exc).__name__}: {exc}) — "
+                  "look for '[smoke' rows and courses manually")
+        finally:
             try:
-                post(base, "delete", token=token, id=eid, changed_by="smoke")
-            except Exception:
-                print("  ! could not delete smoke expense — remove '[smoke]' row manually")
-        for expense in store.find("smoke-mcp"):
-            try:
-                store.delete(expense.id, changed_by="smoke-cleanup")
-            except Exception:
-                print("  ! could not delete MCP smoke expense — remove it manually")
-        check("smoke link revoked", store.revoke_token(token))
+                check("smoke link revoked", store.revoke_token(token))
+            except Exception as exc:
+                check("smoke link revoked", False,
+                      f"{type(exc).__name__}: {exc} — revoke the 'smoke-test' link by id")
 
     print("\nRESULT:", "FAIL — see ✗ above" if FAILED else
           "PASS — deployment verified end-to-end.")

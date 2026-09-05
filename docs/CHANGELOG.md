@@ -40,6 +40,22 @@ reverses half of one decision is not an undo.
   posture as the action-constraint migration — and `smoke_live.py` gates on
   it. Production holds one refund row today, unresized, which reads as
   before.
+- **`smoke_live.py` cleans up even when it fails.** The first post-deploy
+  run of this release failed at the MCP step and then failed again inside
+  its own cleanup, before the revoke — leaving a never-expiring `smoke-test`
+  link live and an unpaid `[smoke-mcp] 足球课` row in her 待付 tab (both
+  found and removed by hand the same hour; the second run then failed only
+  because that row made "exactly the rows I created" untrue). Each cleanup
+  step is now guarded on its own and the revoke sits in a `finally` of its
+  own; the MCP failure prints its cause rather than only its type; and the
+  paid-by-query step targets the smoke's own row, since a bare 足球课 also
+  matches the household's real football rows.
+
+**Deployed 2026-09-05** as `family-expenses-00016-h86`. Both migrations
+report nothing missing on Neon; the smoke passes; and the prompt's exact
+reproduction — ¥1,000 for ten, two attended, ¥500 refunded and resized to
+five, undone — read ten classes at ¥100 again through the deployed tools, on
+a throwaway row removed afterwards.
 
 ## [0.13.0] — 2026-09-05
 
