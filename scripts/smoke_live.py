@@ -38,8 +38,10 @@ FAILED = False
 EXPECTED_MCP_TOOLS = {
     "expenses_help", "expenses_list", "expenses_add", "expenses_mark_paid",
     "expenses_update", "expenses_delete", "expenses_history",
+    "expenses_refund", "expenses_refund_delete",
     "expenses_mint_link", "expenses_revoke_link", "expenses_list_links",
-    "classes_list", "classes_add", "classes_log",
+    "classes_list", "classes_add", "classes_log", "classes_log_delete",
+    "classes_update", "classes_delete",
 }
 
 
@@ -162,6 +164,7 @@ async def exercise_public_mcp(base: str) -> None:
     from mcp.client.streamable_http import streamablehttp_client
 
     created_ids: list[str] = []
+    package_ids: list[str] = []   # removed FIRST in cleanup: a funded payment refuses delete
     async with streamablehttp_client(f"{base}/mcp") as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -242,10 +245,15 @@ async def exercise_public_mcp(base: str) -> None:
                     "amount": "1000", "description": "[smoke-mcp] 钢琴课",
                     "category": "aden-edu", "submitted_by": "smoke-mcp",
                 }))
+                # …and it is cleaned up. Until v0.13.0 this id was never
+                # appended, so every smoke run left a ¥1,000 unpaid row in her
+                # 待付 tab and a live course in her Classes tab.
+                created_ids.append(course["id"])
                 package = _tool_payload(await session.call_tool("classes_add", {
                     "name": "[smoke] 钢琴课", "class_count": "3",
                     "expense_id": course["id"],
                 }))
+                package_ids.append(package["id"])
                 assert package["summary"]["rate"] == 333.33, package["summary"]
                 logged = _tool_payload(await session.call_tool("classes_log", {
                     "package_id": package["id"], "kind": "attended",
@@ -257,7 +265,39 @@ async def exercise_public_mcp(base: str) -> None:
                 assert round(s["used_amount"] + s["remaining_amount"], 2) == 1000.00, s
                 listed = _tool_payload(await session.call_tool("classes_list", {}))
                 assert any(p["id"] == package["id"] for p in listed["packages"])
+
+                # Refunds, end to end against real Postgres. The widened
+                # expense_history.action constraint is v0.13.0's largest new
+                # risk and this is the one place it meets production: a refund
+                # writes a 'refund' history row, so if the startup migration
+                # did not apply, this is where it shows. ¥100.01 so the
+                # effective figure does not divide by three either.
+                _tool_payload(await session.call_tool("expenses_mark_paid", {
+                    "expense_id": course["id"], "changed_by": "smoke-mcp",
+                }))
+                refunded = _tool_payload(await session.call_tool("expenses_refund", {
+                    "expense_id": course["id"], "amount": "100.01",
+                    "reason": "[smoke-mcp]", "changed_by": "smoke-mcp",
+                }))
+                assert refunded["amount"] == 899.99, refunded
+                assert refunded["gross_amount"] == 1000.0, refunded
+                assert refunded["package"]["summary"]["amount"] == 899.99, refunded["package"]
+                restored = _tool_payload(await session.call_tool("expenses_refund_delete", {
+                    "refund_id": refunded["refund"]["id"], "changed_by": "smoke-mcp",
+                }))
+                assert restored["amount"] == 1000.0 and restored["refunds"] == [], restored
+                history = _tool_payload(await session.call_tool("expenses_history", {
+                    "expense_id": course["id"],
+                }))
+                assert [h["action"] for h in history["history"]][-2:] == [
+                    "refund", "refund_delete",
+                ], history
             finally:
+                for package_id in package_ids:
+                    await session.call_tool(
+                        "classes_delete",
+                        {"package_id": package_id, "changed_by": "smoke-mcp"},
+                    )
                 for expense_id in created_ids:
                     await session.call_tool(
                         "expenses_delete",
@@ -279,6 +319,12 @@ def main() -> int:
         return 1
     store.db.init()  # idempotent — proves the portable DDL on real PG
     check("schema.sql applied idempotently to Postgres", True)
+    # v0.13.0 widened expense_history.action in place at startup. If that
+    # did not take, every refund, course edit and class log is refused —
+    # and the only other sign is one WARNING line in the Cloud Run log.
+    missing = store.db.history_actions_missing()
+    check("expense_history accepts every action (v0.13.0 migration applied)",
+          not missing, f"still rejected: {missing}")
 
     minted = store.mint_token(label="smoke-test")
     token = minted["token"]

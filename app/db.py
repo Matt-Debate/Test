@@ -164,6 +164,7 @@ class Database:
             except BaseException:
                 conn.rollback()
                 raise
+        self._migrate_history_actions()
         failed = self._apply_hardening()
         if failed:
             # the constraint's whole value is turning silent corruption into a
@@ -175,6 +176,116 @@ class Database:
                 f"WARNING: {len(failed)} constraint(s) in db/hardening.sql are "
                 "NOT in force — the audit-order guarantee is unprotected until "
                 "the underlying data is repaired",
+                file=sys.stderr,
+            )
+
+    # ── migrations ────────────────────────────────────────────────────────
+    def history_actions_missing(self) -> list[str]:
+        """The HISTORY_ACTIONS the live CHECK constraint does not yet allow.
+
+        Empty means the audit table accepts every action the store can write.
+        Read by the migration to decide whether to run, and by tests to prove
+        it ran; both drivers are inspected through their own catalog.
+        """
+        from .models import HISTORY_ACTIONS
+
+        if self.is_pg:
+            with self.tx() as tx:
+                rows = tx.query(
+                    "SELECT pg_get_constraintdef(c.oid) AS def FROM pg_constraint c "
+                    "JOIN pg_class t ON t.oid = c.conrelid "
+                    "WHERE t.relname = 'expense_history' AND c.contype = 'c'"
+                )
+            defs = [r["def"] for r in rows if "action" in (r["def"] or "")]
+        else:
+            with self.tx() as tx:
+                row = tx.query_one(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'expense_history'"
+                )
+            defs = [row["sql"]] if row and row["sql"] else []
+        if not defs:
+            return []  # no CHECK on action at all: nothing to widen
+        text = " ".join(defs)
+        return [a for a in HISTORY_ACTIONS if f"'{a}'" not in text]
+
+    def _migrate_history_actions(self) -> None:
+        """Widen expense_history's action CHECK to HISTORY_ACTIONS, once.
+
+        The first change this project has made to a live table that
+        ``CREATE TABLE IF NOT EXISTS`` cannot express. It is driven by
+        inspection rather than by a version number, so it is idempotent and
+        needs no migrations table: if every action is already allowed, nothing
+        runs. Best-effort like the hardening file — a live portal must boot —
+        but a failure here is not silent: the store refuses the first refund
+        with a message naming this step, so nothing half-writes.
+
+        Postgres: drop the inline CHECK (auto-named ``<table>_<column>_check``,
+        but looked up rather than assumed) and add the wider one, in one
+        transaction. sqlite cannot alter a constraint at all, so the table is
+        rebuilt in place — the standard sqlite pattern — inside one explicit
+        BEGIN/COMMIT so a failure leaves the old table untouched.
+        """
+        import sys
+
+        from .models import HISTORY_ACTIONS
+
+        try:
+            missing = self.history_actions_missing()
+            if not missing:
+                return
+            literals = ", ".join(f"'{a}'" for a in HISTORY_ACTIONS)
+            if self.is_pg:
+                with self.tx() as tx:
+                    rows = tx.query(
+                        "SELECT c.conname, pg_get_constraintdef(c.oid) AS def "
+                        "FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid "
+                        "WHERE t.relname = 'expense_history' AND c.contype = 'c'"
+                    )
+                    for r in rows:
+                        if "action" in (r["def"] or ""):
+                            name = str(r["conname"]).replace('"', '""')
+                            tx.execute(
+                                f'ALTER TABLE expense_history DROP CONSTRAINT "{name}"'
+                            )
+                    tx.execute(
+                        "ALTER TABLE expense_history ADD CONSTRAINT "
+                        "expense_history_action_check "
+                        f"CHECK (action IN ({literals}))"
+                    )
+            else:
+                conn = self._conn()
+                with self._lock:
+                    try:
+                        conn.executescript(
+                            "BEGIN;\n"
+                            "DROP TABLE IF EXISTS expense_history__new;\n"
+                            "CREATE TABLE expense_history__new (\n"
+                            "  id TEXT PRIMARY KEY, expense_id TEXT NOT NULL,\n"
+                            "  seq INTEGER NOT NULL,\n"
+                            f"  action TEXT NOT NULL CHECK (action IN ({literals})),\n"
+                            "  changed_by TEXT, changed_at TEXT NOT NULL,\n"
+                            "  snapshot TEXT NOT NULL);\n"
+                            "INSERT INTO expense_history__new "
+                            "(id, expense_id, seq, action, changed_by, changed_at, snapshot) "
+                            "SELECT id, expense_id, seq, action, changed_by, changed_at, snapshot "
+                            "FROM expense_history;\n"
+                            "DROP TABLE expense_history;\n"
+                            "ALTER TABLE expense_history__new RENAME TO expense_history;\n"
+                            "CREATE INDEX IF NOT EXISTS idx_expense_history_expense "
+                            "ON expense_history(expense_id, seq);\n"
+                            "COMMIT;"
+                        )
+                    except BaseException:
+                        conn.rollback()
+                        raise
+            still = self.history_actions_missing()
+            if still:
+                raise RuntimeError(f"constraint still rejects {still}")
+        except Exception as exc:
+            print(
+                f"WARNING: expense_history action migration did not apply ({exc}); "
+                "refunds and class-tracker audit rows will be REFUSED until it does",
                 file=sys.stderr,
             )
 

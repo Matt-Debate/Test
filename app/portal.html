@@ -144,8 +144,19 @@
     border:1px solid var(--rule); border-radius:var(--radius); background:transparent; }
   .btns .pay { color:var(--ok); border-color:var(--ok); font-weight:600; }
   .btns .del { color:var(--danger); }
-  .editbox, .histbox { padding:0 0 14px; }
+  .editbox, .histbox, .refundbox { padding:0 0 14px; }
   .hist { font-size:.75rem; color:var(--muted); margin:3px 0; overflow-wrap:anywhere; }
+  /* a refund on the row's sub-line reads in the lend ink: money that came
+     back, not money that went out */
+  .ex-sub .rf { color:var(--lend); }
+  /* finished courses: a collapsed group at the foot of the Classes tab, so a
+     retired course moves somewhere she can still open rather than vanishing */
+  details.arch { border-top:1px solid var(--line); margin-top:18px; }
+  details.arch summary { cursor:pointer; list-style:none; padding:10px 2px;
+    font-size:.78rem; letter-spacing:.16em; text-transform:uppercase;
+    font-weight:600; color:var(--muted); display:flex; justify-content:space-between; }
+  details.arch summary::-webkit-details-marker { display:none; }
+  details.arch[open] summary { color:var(--text); }
   /* inline × that removes one logged class from a course */
   .hist .lnk { width:auto; display:inline; border:0; padding:0 4px; cursor:pointer;
     color:var(--danger); font-size:.85rem; line-height:1; background:transparent; }
@@ -326,6 +337,19 @@
       cls_confirm_del:"删除这个课程和它的上课记录？",
       cls_confirm_unlog:"删除这条上课记录？", cls_over:"超出",
       cls_logged:"已记录", cls_capped:"超出上限", cls_sec:"课程", cls_of:"共",
+      cls_edit:"编辑", cls_archive:"结课", cls_unarchive:"恢复",
+      cls_archived_sec:"已结课", cls_confirm_archive:"这个课程已经结束了？它会移到「已结课」。",
+      cls_class_count:"课时数", cls_course:"课程",
+      // refunds — money that came BACK on a paid row. The row keeps its
+      // original figure; the refund is its own record with its own date
+      refund:"退款", refund_title:"记一笔退款", refund_amt:"退款金额 (¥)",
+      refund_date:"退款日期", refund_reason:"原因（可不填）",
+      refund_resize:"课时改为", refund_resize_now:"现在", refund_save:"记录退款",
+      refund_of:"退款", orig:"原价", amount_gross:"金额 (¥，退款前)",
+      refund_confirm_undo:"删除这条退款记录？", refunded_toast:"已记录退款",
+      refund_removed:"已删除退款", now_amt:"现", refund_after:"退款后",
+      refund_count_low:"课时数不能少于已上的 {n} 节",
+      refund_period_hint:"按月／学期的课：如果这笔退款是退还停课的费用，记录后请到课程页删除已退的停课记录，并把课时数改成剩下的节数，否则「欠我们」会一直算着它们",
       ev:{ attended:"上了", missed_school:"停课", missed_us:"没去" },
       sec_due:"待付 · 未来30天", sec_later:"待付 · 30天以后",
       sec_paid:"本月已付", sec_lent:"待还我", sec_repaid:"本月已还我",
@@ -351,7 +375,10 @@
         utilities:"水电", internet:"网络", mobile:"手机", transport:"交通",
         travel:"旅行", entertainment:"娱乐", clothes:"衣服", medical:"医疗",
         borrow:"我垫付", other:"其他" },
-      act:{ create:"创建", update:"修改", mark_paid:"标记已付", unmark_paid:"取消已付", "delete":"删除" } },
+      act:{ create:"创建", update:"修改", mark_paid:"标记已付", unmark_paid:"取消已付", "delete":"删除",
+        refund:"退款", refund_delete:"删除退款", package_create:"添加课程",
+        package_update:"修改课程", package_delete:"删除课程", class_log:"记录上课",
+        class_unlog:"删除上课记录" } },
     en: { title:"Family Expenses", due_now:"To pay", upcoming:"Upcoming", lent:"Owed to me",
       paid_month:"Paid this month", add:"Add an expense", amount:"Amount (¥)", due:"Due date",
       desc:"Description", desc_ph:"what / who to pay", category:"Category", save_new:"Add",
@@ -370,6 +397,18 @@
       cls_confirm_del:"Delete this course and its class log?",
       cls_confirm_unlog:"Delete this class record?", cls_over:"over",
       cls_logged:"Logged", cls_capped:"capped, over by", cls_sec:"Courses", cls_of:"of",
+      cls_edit:"Edit", cls_archive:"Finished", cls_unarchive:"Restore",
+      cls_archived_sec:"Finished courses",
+      cls_confirm_archive:"Is this course finished? It moves to \"Finished courses\".",
+      cls_class_count:"Classes", cls_course:"Course",
+      refund:"Refund", refund_title:"Record a refund", refund_amt:"Refund amount (¥)",
+      refund_date:"Refund date", refund_reason:"Reason (optional)",
+      refund_resize:"Classes now", refund_resize_now:"currently", refund_save:"Record refund",
+      refund_of:"refunded", orig:"originally", amount_gross:"Amount (¥, before refunds)",
+      refund_confirm_undo:"Delete this refund record?", refunded_toast:"Refund recorded",
+      refund_removed:"Refund removed", now_amt:"now", refund_after:"after refund",
+      refund_count_low:"Classes can't be fewer than the {n} already attended",
+      refund_period_hint:"Term fee: if this refund settles cancelled classes, delete those class records on the Classes tab and set the class count to what remains, or \"owed to us\" keeps claiming them",
       ev:{ attended:"attended", missed_school:"cancelled", missed_us:"skipped" },
       sec_due:"Due · next 30 days", sec_later:"Due · beyond 30 days",
       sec_paid:"Paid this month", sec_lent:"Owed to me",
@@ -396,7 +435,10 @@
         utilities:"Utilities", internet:"Internet", mobile:"Mobile", transport:"Transport",
         travel:"Travel", entertainment:"Entertainment", clothes:"Clothes", medical:"Medical",
         borrow:"I lent (owed back)", other:"Other" },
-      act:{ create:"created", update:"edited", mark_paid:"marked paid", unmark_paid:"unmarked", "delete":"deleted" } },
+      act:{ create:"created", update:"edited", mark_paid:"marked paid", unmark_paid:"unmarked", "delete":"deleted",
+        refund:"refund", refund_delete:"refund removed", package_create:"course added",
+        package_update:"course edited", package_delete:"course removed", class_log:"class logged",
+        class_unlog:"class record removed" } },
   };
 
   var lang = localStorage.getItem("fe.lang") || "zh";
@@ -405,6 +447,7 @@
   var summary = {};
   var packages = [];    // class tracker, loaded by refreshClasses()
   var openPkgs = {};     // which courses are expanded, across re-renders
+  var clsEdit = {};      // which courses have their edit box open
   // A date she has explicitly picked, per course. It exists ONLY so the pick
   // survives the re-render another row's tap causes — it never decides what
   // gets logged; the box does. Empty ⇒ the box shows today.
@@ -412,6 +455,12 @@
   // which courses have a log request in flight. Outside the DOM on purpose:
   // a re-render replaces a disabled button with an enabled one.
   var clsBusy = {};
+  // which expenses have a refund request in flight. Same shape and same
+  // reason as clsBusy: a refund is not idempotent, and the store accepts a
+  // second one equal to what is left, so two fast taps on 记录退款 wrote two
+  // refund rows — ¥100 meant became ¥200 back. Found by the cross-model
+  // review after three same-model rounds had read the handler.
+  var refundBusy = {};
   var candidates = [];  // payments not yet tracked by a package
 
   function t(key) { var v = STR[lang][key]; return typeof v === "string" ? v : key; }
@@ -690,12 +739,27 @@
 
   var openItems = {};  // survives the re-render after pay/edit, like openMonths
 
+  // A refund is offered on a paid household row only: money cannot come back
+  // before it went out, and a repaid loan is a different thing with its own
+  // words (stateOf). Store.refund() refuses both of those cases as well, so
+  // the two surfaces agree; this keeps the button off rows where it would
+  // only produce an error toast. (A PARTIAL repayment of a loan has no
+  // primitive on either surface — docs/BACKLOG.md §11.)
+  function canRefund(e) { return !!e.paid && !isBorrow(e); }
+
   function itemHtml(e) {
     var catLabel = categoryLabel(e);
     var st = stateOf(e);
     var open = !!openItems[e.id];
+    var refunded = Number(e.refunded || 0) > 0;
     var sub = '<span class="st ' + st.cls + '">' + esc(st.text) + "</span>" +
-      (catLabel ? " · " + esc(catLabel) : "");
+      (catLabel ? " · " + esc(catLabel) : "") +
+      // the figure on the right is what this row COSTS now; when money came
+      // back, say so beside it rather than leaving ¥1,800 to look like the
+      // price she paid — that is the row she would otherwise "correct"
+      (refunded ? ' · <span class="rf">' + esc(t("orig")) + " " + esc(money(e.gross_amount)) +
+        " · " + esc(t("refund_of")) + " " + esc(money(e.refunded)) + "</span>" : "") +
+      (e.package && e.package.name ? " · " + esc(t("cls_course")) + " " + esc(e.package.name) : "");
     return '<div class="item' + (open ? " open" : "") + (e.paid ? " paid" : "") +
         '" data-id="' + esc(e.id) + '">' +
       '<div class="ex-hd" role="button" tabindex="0" aria-expanded="' + (open ? "true" : "false") + '">' +
@@ -707,15 +771,192 @@
       "</div>" +
       (open ?
         '<div class="btns">' +
-          '<button class="pay" data-act="pay">' + esc(t(e.paid ? "unmark" : "mark_paid")) + "</button>" +
+          // no 取消已付 on a row money has come back on: the server refuses
+          // it (a refund cannot exist on an unpaid bill), and un-paying it
+          // would have put the NET figure on the 待付 card. The refunds
+          // listed just below carry the × that is the way back.
+          (refunded && e.paid ? "" :
+            '<button class="pay" data-act="pay">' + esc(t(e.paid ? "unmark" : "mark_paid")) + "</button>") +
           '<button data-act="edit">' + esc(t("edit")) + "</button>" +
+          (canRefund(e) ? '<button data-act="refund">' + esc(t("refund")) + "</button>" : "") +
           '<button data-act="hist">' + esc(t("hist")) + "</button>" +
           '<button class="del" data-act="del">' + esc(t("del")) + "</button>" +
         "</div>" +
+        refundsHtml(e) +
         '<div class="editbox" style="display:none"></div>' +
+        '<div class="refundbox" style="display:none"></div>' +
         '<div class="histbox" style="display:none"></div>'
         : "") +
       "</div>";
+  }
+
+  // Each refund on an open row, with an × that takes it back — the same
+  // shape as a logged class on the Classes tab, and it names what it would
+  // delete for the same reason.
+  function refundsHtml(e) {
+    var rows = e.refunds || [];
+    if (!rows.length) return "";
+    return '<div class="refunds">' + rows.map(function (r) {
+      var when = r.date + " · " + money(r.amount);
+      return '<div class="hist">' + esc(t("refund_of")) + " " + esc(money(r.amount)) +
+        " · " + esc(r.date) +
+        (r.reason ? " · " + esc(r.reason) : "") +
+        (r.changed_by ? " · " + esc(r.changed_by) : "") +
+        ' <button class="lnk" data-unrefund="' + esc(r.id) + '" data-when="' +
+          esc(when) + '">×</button></div>';
+    }).join("") + "</div>";
+  }
+
+  // The edit box shows the ORIGINAL amount, never the effective one: the
+  // field round-trips into a write, and prefilling ¥1,800 on a ¥3,600 row
+  // refunded ¥1,800 would let a tap on Save turn the payment into ¥1,800
+  // gross and ¥0 net. The label says which figure it is when it matters.
+  function editBoxHtml(exp) {
+    var refunded = Number(exp.refunded || 0) > 0;
+    var gross = exp.gross_amount == null ? exp.amount : exp.gross_amount;
+    return '<div class="row"><div><label>' + esc(t(refunded ? "amount_gross" : "amount")) + '</label>' +
+        '<input type="number" step="0.01" min="0.01" class="e-amt" value="' + esc(gross) + '"></div>' +
+      '<div><label>' + esc(t("due")) + '</label>' +
+        '<input type="date" class="e-date" value="' + esc(exp.date) + '"></div></div>' +
+      '<label>' + esc(t("desc")) + '</label>' +
+        '<input type="text" class="e-desc" value="' + esc(exp.description || "") + '">' +
+      '<label>' + esc(t("category")) + '</label><select class="e-cat">' +
+        CATS.map(function (c) {
+          return '<option value="' + esc(c) + '"' + (exp.category === c ? " selected" : "") + ">" +
+            esc(STR[lang].cat[c] || c) + "</option>"; }).join("") +
+      "</select>" +
+      '<div class="btns" style="margin-top:10px"><button class="pay" data-e="save">' + esc(t("save")) +
+      '</button><button data-e="cancel">' + esc(t("cancel")) + "</button></div>";
+  }
+
+  // Amount, date, reason — and, when the payment funds a per-class pack, the
+  // new class count, prefilled with the current one. A refund on a course is
+  // almost always "fewer classes for less money", and the two halves entered
+  // separately leave a moment where ¥1,800 over 10 classes reprices a ¥360
+  // class at ¥180. The server applies both in one transaction.
+  function refundBoxHtml(exp) {
+    var pkg = exp.package && exp.package.kind === "per_class" ? exp.package : null;
+    return '<div class="hist">' + esc(t("refund_title")) + " · " + esc(t("orig")) + " " +
+        esc(money(exp.gross_amount == null ? exp.amount : exp.gross_amount)) +
+        (Number(exp.refunded || 0) > 0 ? " · " + esc(t("refund_of")) + " " + esc(money(exp.refunded)) : "") +
+      "</div>" +
+      '<div class="row"><div><label>' + esc(t("refund_amt")) + '</label>' +
+        '<input type="number" step="0.01" min="0.01" class="r-amt" value=""></div>' +
+      '<div><label>' + esc(t("refund_date")) + '</label>' +
+        '<input type="date" class="r-date" value="' + esc(todayStr()) + '"></div></div>' +
+      '<label>' + esc(t("refund_reason")) + '</label>' +
+        '<input type="text" class="r-reason" value="">' +
+      (pkg ?
+        '<label>' + esc(t("refund_resize")) + " · " + esc(pkg.name) + " · " +
+          esc(t("refund_resize_now")) + " " + esc(String(pkg.class_count)) + esc(t("cls_cls")) + '</label>' +
+        // floored at the classes already attended: below that the server
+        // refuses the resize, and the refund with it
+        '<input type="number" min="' + esc(String(Math.max(1, Number(pkg.attended || 0)))) +
+          '" step="1" class="r-count" data-current="' +
+          esc(String(pkg.class_count)) + '" value="' + esc(String(pkg.class_count)) + '">' +
+        // what the course will say AFTER this refund, live as she types:
+        // leaving the count alone is a real choice ("same classes, less
+        // money"), but it must never be a silent one — ¥1,800 over ten
+        // classes reads ¥180 a class, and that is the reprice this release
+        // exists to prevent. The value shown is the value that gets written.
+        '<div class="hist r-hint">' + esc(refundHintText(exp, 0, pkg.class_count)) + "</div>"
+        : "") +
+      (exp.package && exp.package.kind === "period"
+        // a term fee: the refund usually SETTLES cancelled classes, and
+        // "owed" keeps claiming them until their records are removed
+        ? '<div class="hist r-hint">' + esc(t("refund_period_hint")) + "</div>"
+        : "") +
+      '<div class="btns" style="margin-top:10px"><button class="pay" data-r="save">' + esc(t("refund_save")) +
+      '</button><button data-r="cancel">' + esc(t("cancel")) + "</button></div>";
+  }
+
+  // The per-class course's figures after a refund of `amount` with the count
+  // set to `count` (0 = leave it). A PREVIEW, by the server's rule — a part
+  // (what was used) is the exact ratio, and what is left is derived from the
+  // total by subtraction, never rounded on its own (Store.summarize_package).
+  // toFixed rounds the EXACT binary value, as Python's round() does — where
+  // Math.round(x * 100) first multiplies and can land on a true half that
+  // the exact value was below (¥3,599.99 × 5 ÷ 10 is 1799.99499…, and read
+  // a cent high). Only an exact binary tie, a multiple of ⅛, can still differ,
+  // and the confirmation toast quotes the SERVER's figures, which is what
+  // makes any drift visible. Same precedent as clsRateHint on the add form.
+  // A count below the classes already attended is a state the server refuses
+  // outright (and the refund with it), so the preview says so instead of
+  // showing a plausible "0 left".
+  function refundHintText(exp, amount, count) {
+    var pkg = exp.package && exp.package.kind === "per_class" ? exp.package : null;
+    if (!pkg) return "";
+    var attended = Number(pkg.attended || 0);
+    if (count > 0 && count < attended) {
+      return t("refund_count_low").replace("{n}", String(attended));
+    }
+    var gross = exp.gross_amount == null ? exp.amount : exp.gross_amount;
+    var net = Math.max(0, Number(gross) - Number(exp.refunded || 0) - (amount > 0 ? amount : 0));
+    var n = count > 0 ? count : Number(pkg.class_count);
+    var left = Math.max(0, n - attended);
+    var used = attended >= n ? net : Number((net * attended / n).toFixed(2));
+    var leftAmt = Math.max(0, Number((net - used).toFixed(2)));
+    return t("refund_after") + " " + t("cls_rate") + " " + money(net / n) + " · " +
+      t("cls_left") + " " + left + t("cls_cls") +
+      (left > 0 ? " (" + money(leftAmt) + ")" : "");
+  }
+
+  // What the refund box posts. The count is sent ONLY when she changed it:
+  // an unchanged count would still be a course edit on the server, with an
+  // audit row saying 10 → 10. A blank or non-numeric count is "leave it".
+  function refundBody(id, box) {
+    var body = {
+      id: id,
+      amount: parseFloat(box.querySelector(".r-amt").value),
+      date: box.querySelector(".r-date").value || todayStr(),
+      reason: (box.querySelector(".r-reason").value || "").trim() || null,
+    };
+    var countEl = box.querySelector(".r-count");
+    if (countEl) {
+      var n = parseInt(countEl.value, 10);
+      var current = parseInt(countEl.getAttribute("data-current"), 10);
+      if (n > 0 && n !== current) body.resize_package_to = n;
+    }
+    return body;
+  }
+
+  // One history line. The trail now carries refunds and the course's own
+  // changes beside the expense's, and each shape needs its own words: a
+  // refund is its amount and date, a course is its name and count, a class
+  // is its date. Old snapshots have no gross_amount; `amount` was gross then.
+  function histLineHtml(h) {
+    var snap = h.snapshot || {};
+    var head = esc(String(h.changed_at).replace("T", " ")) + " · " +
+      esc(STR[lang].act[h.action] || h.action) +
+      (h.changed_by ? " · " + esc(h.changed_by) : "");
+    var body;
+    if (h.action === "refund" || h.action === "refund_delete") {
+      var r = snap.refund || {};
+      body = esc(money(r.amount)) + (r.date ? " · " + esc(r.date) : "") +
+        (r.reason ? " · " + esc(r.reason) : "") +
+        " · " + esc(t("now_amt")) + " " + esc(money(snap.amount));
+    } else if (h.action === "class_log" || h.action === "class_unlog") {
+      body = esc(snap.name || "") + " · " + (snap.events || []).map(function (ev) {
+        return esc(ev.date) + " " + esc(STR[lang].ev[ev.kind] || ev.kind);
+      }).join(", ");
+    } else if (h.action === "package_create" || h.action === "package_update" ||
+               h.action === "package_delete") {
+      body = esc(snap.name || "") + " · " + esc(String(snap.class_count || "")) + esc(t("cls_cls")) +
+        (h.action === "package_delete" && snap.events
+          ? " · " + esc(String(snap.events.length)) + " " + esc(t("cls_logged")) : "");
+    } else {
+      // an expense can be entered already-paid, which is a single 'create'
+      // entry — without the date it carries, the trail would not say when
+      // the money actually moved. Whenever the row is paid, not just on
+      // 'create': `changed_at` says when the entry was made, `paid_date`
+      // when the money moved.
+      var paidOn = (snap.paid && snap.paid_date)
+        ? " · " + esc(t("paid_on")) + " " + esc(snap.paid_date) : "";
+      body = esc(money(snap.amount)) +
+        (Number(snap.refunded || 0) > 0
+          ? " (" + esc(t("orig")) + " " + esc(money(snap.gross_amount)) + ")" : "") + paidOn;
+    }
+    return '<div class="hist">' + head + " · " + body + "</div>";
   }
 
   function listHtml(rows) {
@@ -1137,11 +1378,76 @@
         return esc(p.name) + " · " + (esc(p.period_label) ||
           esc(p.expense.description) || esc(p.expense.date));
       }), packages.map(function (p) { return p.id; }));
+    // ONE list partitioned into running and finished — not a filter. A
+    // finished course used to be simply absent (the tab never asked for
+    // archived rows, and nothing could set the flag); now that she can retire
+    // one, it has to go SOMEWHERE she can open, or the first course she
+    // archives by mistake is gone with no way back (LESSONS §12).
+    var live = [], done = [];
+    packages.forEach(function (p, idx) {
+      (p.archived ? done : live).push(pkgRowHtml(p, titles[idx]));
+    });
+    // Every tap re-renders the whole tab, and a rebuilt <details> is closed —
+    // so tapping a finished course collapsed the group it sits in, under her
+    // finger. The open state is read from what is on screen, not from a flag
+    // kept beside it (LESSONS §5): the element she can see is the truth.
+    var prevArch = body.querySelector("details.arch");
+    var archOpen = !!(prevArch && prevArch.open);
     body.innerHTML = '<div class="sec"><h2>' + esc(t("cls_sec")) + "</h2><span class='tot'>" +
-      esc(packages.length + " " + t("cls_cls")) + "</span></div><div class='list'>" +
-      packages.map(function (p, idx) {
+      esc(live.length + " " + t("cls_cls")) + "</span></div><div class='list'>" +
+      (live.length ? live.join("") : '<div class="empty">' + esc(t("cls_none")) + "</div>") +
+      "</div>" +
+      (done.length
+        ? '<details class="arch"' + (archOpen ? ' open=""' : "") + '><summary><span>' +
+          esc(t("cls_archived_sec")) + "</span><span>" +
+          esc(String(done.length)) + "</span></summary><div class='list'>" + done.join("") +
+          "</div></details>"
+        : "");
+  }
+
+  // The inline course editor: name, count and — for a period fee — the label.
+  // Never the money: the rate is the payment ÷ count, and the payment is
+  // edited on the Due tab. Inputs carry the course id so the save handler
+  // can find them after the re-render that opening the box causes.
+  function clsEditHtml(p) {
+    return '<div class="editbox">' +
+      '<div class="row"><div><label for="c-name-' + esc(p.id) + '">' + esc(t("cls_name")) + '</label>' +
+        '<input type="text" class="c-name" id="c-name-' + esc(p.id) + '" value="' + esc(p.name) + '"></div>' +
+      '<div><label for="c-count-' + esc(p.id) + '">' + esc(t("cls_class_count")) + '</label>' +
+        '<input type="number" min="1" step="1" class="c-count" id="c-count-' + esc(p.id) +
+          '" value="' + esc(String(p.class_count)) + '"></div></div>' +
+      (p.kind === "period"
+        ? '<label for="c-period-' + esc(p.id) + '">' + esc(t("cls_period")) + '</label>' +
+          '<input type="text" class="c-period" id="c-period-' + esc(p.id) + '" value="' +
+            esc(p.period_label || "") + '">'
+        : "") +
+      '<div class="btns" style="margin-top:10px">' +
+        '<button class="pay" data-c="savepkg">' + esc(t("save")) + "</button>" +
+        '<button data-c="cancelpkg">' + esc(t("cancel")) + "</button></div>" +
+    "</div>";
+  }
+
+  // What the course editor posts: the fields as typed, the count as a number
+  // (it divides the money), the label only where the kind has one.
+  function clsEditBody(id, kind) {
+    var nameEl = document.getElementById("c-name-" + id);
+    var countEl = document.getElementById("c-count-" + id);
+    // the editor she typed into is what gets posted; if a re-render has
+    // taken it off the screen there is nothing honest to post
+    if (!nameEl || !countEl) return null;
+    var fields = {
+      name: (nameEl.value || "").trim(),
+      class_count: parseInt(countEl.value, 10),
+    };
+    if (kind === "period") {
+      var periodEl = document.getElementById("c-period-" + id);
+      fields.period_label = periodEl ? (periodEl.value || "").trim() || null : null;
+    }
+    return { id: id, fields: fields };
+  }
+
+  function pkgRowHtml(p, title) {
         var L = clsLine(p);
-        var title = titles[idx];
         var isOpen = !!openPkgs[p.id];
         return '<div class="item' + (isOpen ? " open" : "") + '" data-pkg="' +
           esc(p.id) + '">' +
@@ -1181,12 +1487,20 @@
               : "") +
             '<button data-c="missed_school">' + esc(t("cls_cancel")) + "</button>" +
             '<button data-c="missed_us">' + esc(t("cls_skip")) + "</button>" +
+          "</div>" +
+          // the course's own controls on a second line: six buttons on one
+          // row do not fit a phone, and these three are the rare ones
+          '<div class="btns"' + (isOpen ? "" : ' hidden=""') + ">" +
+            '<button data-c="editpkg">' + esc(t("cls_edit")) + "</button>" +
+            (p.archived
+              ? '<button data-c="unarchpkg">' + esc(t("cls_unarchive")) + "</button>"
+              : '<button data-c="archpkg">' + esc(t("cls_archive")) + "</button>") +
             '<button class="del" data-c="delpkg">' + esc(t("del")) + "</button>" +
           "</div>" +
+          (isOpen && clsEdit[p.id] ? clsEditHtml(p) : "") +
           '<div class="histbox"' + (isOpen ? "" : ' hidden=""') + ">" +
             clsEvents(p) + "</div>" +
         "</div>";
-      }).join("") + "</div>";
   }
 
   function clsEvents(p) {
@@ -1314,6 +1628,17 @@
 
   // ---- per-item actions ----
   document.addEventListener("click", function (ev) {
+    // the × beside a recorded refund: takes that one refund back, after
+    // naming it — the same shape as removing a logged class
+    var unrefund = ev.target.closest ? ev.target.closest("[data-unrefund]") : null;
+    if (unrefund) {
+      ev.stopPropagation();
+      if (!confirm(t("refund_confirm_undo") + "\n" + unrefund.getAttribute("data-when"))) return;
+      api("refund-delete", {refund_id: unrefund.getAttribute("data-unrefund")})
+        .then(function () { toast(t("refund_removed")); refresh(); })
+        .catch(function (e) { toast(e.message); });
+      return;
+    }
     var btn = ev.target.closest ? ev.target.closest("button[data-act]") : null;
     if (!btn) return;
     var itemEl = btn.closest(".item");
@@ -1322,7 +1647,55 @@
     if (!exp) return;
     var act = btn.getAttribute("data-act");
 
-    if (act === "pay") {
+    if (act === "refund") {
+      var rbox = itemEl.querySelector(".refundbox");
+      if (rbox.style.display !== "none") { rbox.style.display = "none"; return; }
+      rbox.style.display = "block";
+      rbox.innerHTML = refundBoxHtml(exp);
+      // the preview follows what she types — amount or count
+      rbox.oninput = function () {
+        var h = rbox.querySelector(".r-hint"), a = rbox.querySelector(".r-amt"),
+            c = rbox.querySelector(".r-count");
+        if (h && a && c) {
+          h.textContent = refundHintText(exp, parseFloat(a.value) || 0, parseInt(c.value, 10) || 0);
+        }
+      };
+      rbox.onclick = function (ev2) {
+        var b2 = ev2.target.closest ? ev2.target.closest("button[data-r]") : null;
+        if (!b2) return;
+        ev2.stopPropagation(); ev2.preventDefault();
+        if (b2.getAttribute("data-r") === "cancel") { rbox.style.display = "none"; return; }
+        // ONE refund in flight per row, and no timer releases it: the write
+        // is not idempotent, so a retry after a lost response could record
+        // the refund twice. Released after the answer — success (the row is
+        // re-rendered, the box is gone) or an answered refusal (nothing was
+        // written). A network-level failure stays locked until reload, the
+        // same trade the class log makes (LESSONS §6).
+        if (refundBusy[id]) return;
+        refundBusy[id] = true;
+        b2.disabled = true;
+        api("refund", refundBody(id, rbox))
+          .then(function (j) {
+            // confirm with what the server recorded, not with the field —
+            // including the course's rate, resized or not, so the reprice
+            // is never silent
+            var r = j && j.refund, p = j && j.package, s = p && p.summary;
+            toast(t("refunded_toast") + (r ? " · " + money(r.amount) + " · " + r.date : "") +
+              (s ? " · " + t("cls_rate") + " " + money(s.rate) +
+                (p.kind === "per_class" ? " · " + t("cls_left") + " " + s.remaining + t("cls_cls") : "")
+                : ""), 4000);
+            // RETURNED, so the release below waits for the re-render: until
+            // /api/list answers, the old box is still on screen with a
+            // cleared amount field, and only the lock keeps it inert
+            return refresh();
+          })
+          .then(function () { delete refundBusy[id]; })
+          .catch(function (e) {
+            toast(e.message);
+            if (e && e.answered) { delete refundBusy[id]; b2.disabled = false; }
+          });
+      };
+    } else if (act === "pay") {
       if (exp.paid) {
         api("mark-paid", {id:id, paid:false})
           .then(function () { toast(t("unmarked")); refresh(); })
@@ -1343,20 +1716,7 @@
       var box = itemEl.querySelector(".editbox");
       if (box.style.display !== "none") { box.style.display = "none"; return; }
       box.style.display = "block";
-      box.innerHTML =
-        '<div class="row"><div><label>' + esc(t("amount")) + '</label>' +
-          '<input type="number" step="0.01" min="0.01" class="e-amt" value="' + esc(exp.amount) + '"></div>' +
-        '<div><label>' + esc(t("due")) + '</label>' +
-          '<input type="date" class="e-date" value="' + esc(exp.date) + '"></div></div>' +
-        '<label>' + esc(t("desc")) + '</label>' +
-          '<input type="text" class="e-desc" value="' + esc(exp.description || "") + '">' +
-        '<label>' + esc(t("category")) + '</label><select class="e-cat">' +
-          CATS.map(function (c) {
-            return '<option value="' + esc(c) + '"' + (exp.category === c ? " selected" : "") + ">" +
-              esc(STR[lang].cat[c] || c) + "</option>"; }).join("") +
-        "</select>" +
-        '<div class="btns" style="margin-top:10px"><button class="pay" data-e="save">' + esc(t("save")) +
-        '</button><button data-e="cancel">' + esc(t("cancel")) + "</button></div>";
+      box.innerHTML = editBoxHtml(exp);
       box.onclick = function (ev2) {
         var b2 = ev2.target.closest ? ev2.target.closest("button[data-e]") : null;
         if (!b2) return;
@@ -1375,22 +1735,8 @@
       if (hbox.style.display !== "none") { hbox.style.display = "none"; return; }
       api("history", {id:id}).then(function (j) {
         hbox.style.display = "block";
-        hbox.innerHTML = (j.history || []).map(function (h) {
-          var snap = h.snapshot || {};
-          // an expense can be entered already-paid, which is a single 'create'
-          // entry — without the date it carries, the trail would not say when
-          // the money actually moved
-          // Whenever the row is paid — not just on 'create'. The payment date
-          // is typed into a prompt, so it can be any date: `changed_at` says
-          // when the entry was made, `paid_date` when the money moved, and
-          // gating this to one action silently dropped the second.
-          var paidOn = (snap.paid && snap.paid_date)
-            ? " · " + esc(t("paid_on")) + " " + esc(snap.paid_date) : "";
-          return '<div class="hist">' + esc(String(h.changed_at).replace("T", " ")) + " · " +
-            esc(STR[lang].act[h.action] || h.action) +
-            (h.changed_by ? " · " + esc(h.changed_by) : "") +
-            " · " + esc(money(snap.amount)) + paidOn + "</div>";
-        }).join("") || '<div class="hist">–</div>';
+        hbox.innerHTML = (j.history || []).map(histLineHtml).join("") ||
+          '<div class="hist">–</div>';
       }).catch(function (e) { toast(e.message); });
     }
   });
@@ -1402,7 +1748,8 @@
   var clsGen = 0;
   function refreshClasses() {
     var gen = ++clsGen;
-    return api("classes-list", {}).then(function (j) {
+    // archived rows too: renderClasses partitions them into their own group
+    return api("classes-list", {include_archived: true}).then(function (j) {
       if (gen !== clsGen) return;  // a newer request already answered
       packages = j.packages || [];
       candidates = j.candidates || [];
@@ -1466,13 +1813,14 @@
     var b = ev.target.closest && ev.target.closest("button[data-c]");
     if (!b) {  // tapping the row opens its actions and its class log
       // …but the date picker lives inside the row, and opening it must not
-      // count as a tap on the row itself — that closed the row underneath her
-      if (ev.target.closest && ev.target.closest(".clsdate")) return;
+      // count as a tap on the row itself — that closed the row underneath her.
+      // The same for typing in the course editor.
+      if (ev.target.closest && (ev.target.closest(".clsdate") || ev.target.closest(".editbox"))) return;
       openPkgs[id] = !openPkgs[id];
       // a date picked and then abandoned must not wait, hidden, for the next
       // time this row is opened: closing the row is dropping the intent. The
       // memory exists for a re-render caused by ANOTHER row, which this is not.
-      if (!openPkgs[id]) delete clsDates[id];
+      if (!openPkgs[id]) { delete clsDates[id]; delete clsEdit[id]; }
       renderClasses();
       return;
     }
@@ -1485,6 +1833,33 @@
         .catch(function (e) { toast(e.message); });
       return;
     }
+    if (act === "editpkg" || act === "cancelpkg") {
+      if (clsEdit[id] || act === "cancelpkg") delete clsEdit[id]; else clsEdit[id] = true;
+      renderClasses();
+      return;
+    }
+    if (act === "savepkg") {
+      var pkg = packages.filter(function (p) { return p.id === id; })[0];
+      var edit = clsEditBody(id, pkg ? pkg.kind : "per_class");
+      if (!edit) { toast(t("err")); return; }
+      api("classes-update", edit)
+        .then(function () { delete clsEdit[id]; toast(t("saved")); refreshClasses(); })
+        .catch(function (e) { toast(e.message); });
+      return;
+    }
+    if (act === "archpkg" || act === "unarchpkg") {
+      // retiring asks first — the course leaves the running list and she may
+      // not know where it went; restoring is the undo and asks nothing
+      if (act === "archpkg" && !confirm(t("cls_confirm_archive"))) return;
+      api("classes-update", {id:id, fields:{archived: act === "archpkg"}})
+        .then(function () { toast(t("saved")); refreshClasses(); })
+        .catch(function (e) { toast(e.message); });
+      return;
+    }
+    // Everything past this point is a class LOG, and `act` becomes the event
+    // kind the server writes. A button this handler does not know must stop
+    // here rather than fall through and post its name as a kind.
+    if (act !== "attended" && act !== "missed_school" && act !== "missed_us") return;
     // THE BOX IS THE SOURCE OF TRUTH: post exactly the date she can see. Any
     // other rule — a stored copy, an inference from what the row was seeded
     // with — is a second value that can drift from the one on screen, and

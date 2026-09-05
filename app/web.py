@@ -19,6 +19,7 @@ from starlette.routing import Route
 
 from . import auth
 from .api import HANDLERS
+from .config import portal_base_url
 from .store import Store
 
 _PORTAL_PATH = Path(__file__).resolve().parent / "portal.html"
@@ -73,7 +74,7 @@ def _redirect_uri(request: Request) -> str:
     ``http://`` unless proxy headers are trusted — which would produce a
     redirect_uri Auth0 rejects. PORTAL_BASE_URL removes the guesswork.
     """
-    base = (os.environ.get("PORTAL_BASE_URL") or "").strip().rstrip("/")
+    base = portal_base_url()
     if base:
         return f"{base}/callback"
     return str(request.url_for("auth_callback"))
@@ -170,7 +171,7 @@ def _auth_routes() -> list[Route]:
 
     async def logout(request: Request):
         request.session.clear()
-        base = (os.environ.get("PORTAL_BASE_URL") or "").strip().rstrip("/")
+        base = portal_base_url()
         return RedirectResponse(
             auth.logout_url(base or str(request.base_url).rstrip("/")),
             status_code=302,

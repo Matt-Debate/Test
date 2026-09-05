@@ -23,8 +23,10 @@ from app.store import Store  # noqa: E402
 EXPECTED_TOOLS = {
     "expenses_help", "expenses_list", "expenses_add", "expenses_mark_paid",
     "expenses_update", "expenses_delete", "expenses_history",
+    "expenses_refund", "expenses_refund_delete",
     "expenses_mint_link", "expenses_revoke_link", "expenses_list_links",
-    "classes_list", "classes_add", "classes_log",
+    "classes_list", "classes_add", "classes_log", "classes_log_delete",
+    "classes_update", "classes_delete",
 }
 
 _TEST_LOOP = asyncio.new_event_loop()
@@ -706,6 +708,319 @@ class AgentErgonomicsTests(unittest.TestCase):
         with self.assertRaises(ToolError) as ctx:
             run(self.mcp.call_tool("expenses_update", {"query": "足球"}))
         self.assertIn("expenses_mark_paid", str(ctx.exception))  # redirects
+
+
+class RefundAndCourseToolTests(unittest.TestCase):
+    """v0.13.0: the five tools a real day needed and did not have, and the
+    portal host the agent could not name. See tests/test_refunds.py for the
+    store; these prove the same things survive the tool boundary, where the
+    description, the note and the error string are all the agent reads."""
+
+    def setUp(self):
+        self.store = make_store()
+        self.mcp = build_mcp(self.store)
+
+    def call(self, tool, **args):
+        return tool_payload(run(self.mcp.call_tool(tool, args)))
+
+    def badminton(self):
+        """The 2026-09-05 fixture: ¥3,600 for ten, five attended."""
+        e = self.call("expenses_add", amount="3600", description="Badminton (8月-9月)",
+                      date="2026-08-15", category="aden-sports", paid=True,
+                      paid_date="2026-08-15", submitted_by="Matt")
+        p = self.call("classes_add", name="羽毛球 (1:1)", class_count=10,
+                      query="Badminton", changed_by="Matt")
+        logged = self.call("classes_log", kind="attended", query="羽毛球",
+                           dates=["2026-08-17", "2026-08-21", "2026-08-28",
+                                  "2026-08-31", "2026-09-02"], logged_by="wife")
+        return e, p, logged
+
+    def test_the_badminton_day_replays_with_no_rebuild_and_no_portal(self):
+        """The acceptance test, verbatim from the prompt."""
+        e, p, logged = self.badminton()
+        before = {ev["id"]: ev["created_at"] for ev in logged["logged_events"]}
+        r = self.call("expenses_refund", query="Badminton (8月-9月)", amount=1800,
+                      date="2026-09-05", resize_package_to=5, changed_by="Matt")
+        self.assertEqual(r["id"], e["id"])
+        self.assertEqual((r["gross_amount"], r["amount"], r["refunded"]),
+                         (3600.0, 1800.0, 1800.0))
+        s = r["package"]["summary"]
+        self.assertEqual((s["class_count"], s["rate"], s["attended"], s["remaining"]),
+                         (5, 360.0, 5, 0))
+        self.assertIn("¥360.00", r["note"])
+        self.assertIn(r["refund"]["id"], r["note"])
+        after = {ev["id"]: ev["created_at"]
+                 for ev in self.call("classes_list", verbose=True)["packages"][0]["events"]}
+        self.assertEqual(after, before)
+        # step 2 of the acceptance test, unchanged
+        self.call("expenses_add", amount="1800", description="Badminton group 10 classes",
+                  date="2026-09-04", category="aden-sports", submitted_by="wife")
+        self.call("expenses_mark_paid", query="group", paid_date="2026-09-05")
+        self.call("classes_add", name="羽毛球 (group)", class_count=10, query="group")
+        # step 3: net ¥3,600 across the two, and the refund is an event
+        total = self.call("expenses_list", query="badminton")["summary"]
+        self.assertEqual((total["total"], total["paid"], total["count"]), (3600.0, 3600.0, 2))
+        actions = [h["action"] for h in
+                   self.call("expenses_history", expense_id=e["id"])["history"]]
+        self.assertIn("refund", actions)
+        self.assertNotIn("update", actions)
+        self.assertEqual(actions[0], "create")
+
+    def test_deleting_a_payment_with_a_live_course_names_the_tool_and_the_id(self):
+        """The regression test the prompt asked for: the old error pointed at
+        the portal's Classes tab, a surface the agent cannot reach."""
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        _e, p, _logged = self.badminton()
+        with self.assertRaises(ToolError) as ctx:
+            run(self.mcp.call_tool("expenses_delete", {"query": "Badminton"}))
+        text = str(ctx.exception)
+        self.assertIn("classes_delete(package_id=", text)
+        self.assertIn(p["id"], text)
+        self.assertNotIn("Classes tab", text)
+        self.assertEqual(len(self.call("expenses_list")["expenses"]), 1)
+
+    def test_shrinking_a_course_below_its_log_is_refused_at_the_tool_boundary(self):
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        _e, p, logged = self.badminton()
+        last = [ev for ev in logged["logged_events"] if ev["date"] == "2026-09-02"][0]
+        with self.assertRaises(ToolError) as ctx:
+            run(self.mcp.call_tool("classes_update", {"query": "羽毛球", "class_count": 4}))
+        text = str(ctx.exception)
+        self.assertIn("classes_log_delete", text)
+        self.assertIn(last["id"], text)
+        self.assertEqual(self.call("classes_list")["packages"][0]["class_count"], 10)
+
+    def test_a_refund_prefers_the_paid_match(self):
+        self.call("expenses_add", amount="3600", description="Badminton", paid=True)
+        self.call("expenses_add", amount="300", description="Badminton court")
+        r = self.call("expenses_refund", query="Badminton", amount=100)
+        self.assertEqual(r["gross_amount"], 3600.0)
+
+    def test_a_refund_can_be_taken_back_by_the_id_in_its_result(self):
+        e, _p, _l = self.badminton()
+        r = self.call("expenses_refund", expense_id=e["id"], amount=1800)
+        back = self.call("expenses_refund_delete", refund_id=r["refund"]["id"])
+        self.assertEqual((back["amount"], back["refunded"]), (3600.0, 0.0))
+        self.assertIn("¥3600.00", back["note"])
+        from mcp.server.fastmcp.exceptions import ToolError
+        with self.assertRaises(ToolError) as ctx:
+            run(self.mcp.call_tool("expenses_refund_delete", {"refund_id": "nope"}))
+        self.assertIn("expenses_history", str(ctx.exception))
+
+    def test_a_refund_without_a_resize_says_the_reprice_out_loud(self):
+        """The note is what the agent reads back. Leaving a pack at ten
+        classes after a half refund is a real choice, never a silent one."""
+        e, _p, _l = self.badminton()
+        r = self.call("expenses_refund", expense_id=e["id"], amount=1800)
+        self.assertFalse(r["package"]["resized"])
+        self.assertIn("still 10 classes, now ¥180.00 each", r["note"])
+        self.assertIn("resize_package_to", r["note"])
+        self.assertIn("5 left", r["note"])
+
+    def test_a_refund_on_a_term_fee_names_the_classes_it_may_have_settled(self):
+        self.call("expenses_add", amount="2000", description="游泳课 秋季", paid=True,
+                  category="aden-sports")
+        p = self.call("classes_add", name="游泳课", class_count=8, kind="period", query="游泳")
+        logged = self.call("classes_log", kind="missed_school", package_id=p["id"],
+                           dates=["2026-09-01", "2026-09-08", "2026-09-15"])
+        r = self.call("expenses_refund", query="游泳", amount=750, resize_package_to=5)
+        note = r["note"]
+        self.assertIn("term fee", note)
+        self.assertIn("classes_log_delete", note)
+        for ev in logged["logged_events"]:
+            self.assertIn(ev["id"], note)
+        self.assertIn("owed back = ¥750.00", note)   # honest about what it still claims
+        desc = {t.name: " ".join((t.description or "").split())
+                for t in run(self.mcp.list_tools())}
+        self.assertIn("period", desc["expenses_refund"])
+        self.assertIn("classes_log_delete", desc["expenses_refund"])
+
+    def test_unpaying_a_refunded_row_is_refused_at_the_boundary(self):
+        from mcp.server.fastmcp.exceptions import ToolError
+        e, _p, _l = self.badminton()
+        self.call("expenses_refund", expense_id=e["id"], amount=1800)
+        with self.assertRaises(ToolError) as ctx:
+            run(self.mcp.call_tool("expenses_mark_paid", {"expense_id": e["id"], "paid": False}))
+        self.assertIn("expenses_refund_delete", str(ctx.exception))
+        self.assertEqual(self.call("expenses_list")["summary"]["unpaid"], 0.0)
+        desc = {t.name: " ".join((t.description or "").split())
+                for t in run(self.mcp.list_tools())}
+        self.assertIn("expenses_refund_delete", desc["expenses_mark_paid"])
+
+    def test_the_course_notes_quote_the_gross_figure_under_paid(self):
+        """"¥1800.00 paid" on a ¥3,600 payment is the sentence the refund
+        table exists to stop (LESSONS §15)."""
+        e = self.call("expenses_add", amount="3600", description="Badminton", paid=True)
+        self.call("expenses_refund", expense_id=e["id"], amount=1800)
+        added = self.call("classes_add", name="羽毛球", class_count=5, expense_id=e["id"])
+        self.assertIn("¥3600.00 paid", added["note"])
+        self.assertIn("¥1800.00 refunded", added["note"])
+        self.assertNotIn("¥1800.00 paid", added["note"])
+        gone = self.call("classes_delete", package_id=added["id"])
+        self.assertIn("¥3600.00", gone["note"])
+        self.assertIn("¥1800.00 refunded", gone["note"])
+
+    def test_a_spoken_date_list_reaches_the_store_through_the_tool(self):
+        """Typed as a list alone, pydantic refused the string with its own
+        error before the store's tolerance could be reached."""
+        self.call("expenses_add", amount="2200", description="足球课")
+        p = self.call("classes_add", name="足球课", class_count=10, query="足球")
+        out = self.call("classes_log", kind="attended", package_id=p["id"],
+                        dates="2026-08-17, 2026-08-21")
+        self.assertEqual(len(out["logged_events"]), 2)
+        from mcp.server.fastmcp.exceptions import ToolError
+        with self.assertRaises(ToolError) as ctx:
+            run(self.mcp.call_tool("classes_log", {"kind": "attended", "package_id": p["id"],
+                                                   "dates": []}))
+        self.assertIn("omit dates", str(ctx.exception))
+        self.assertEqual(self.call("classes_list")["packages"][0]["events_count"], 2)
+
+    def test_a_query_search_still_honours_since_and_until_through_the_join(self):
+        self.badminton()                                   # 2026-08-15, course 羽毛球
+        self.call("expenses_add", amount="300", description="Badminton court",
+                  date="2026-09-10")
+        by_course = self.call("expenses_list", query="羽毛球")
+        self.assertEqual([e["date"] for e in by_course["expenses"]], ["2026-08-15"])
+        self.assertEqual(self.call("expenses_list", query="羽毛球", since="2026-09-01")
+                         ["expenses"], [])
+        both = self.call("expenses_list", query="badminton", until="2026-08-31")
+        self.assertEqual([e["date"] for e in both["expenses"]], ["2026-08-15"])
+
+    def test_a_refund_on_an_unpaid_row_coaches_at_the_boundary(self):
+        from mcp.server.fastmcp.exceptions import ToolError
+        self.call("expenses_add", amount="300", description="足球课")
+        with self.assertRaises(ToolError) as ctx:
+            run(self.mcp.call_tool("expenses_refund", {"query": "足球", "amount": "50"}))
+        self.assertIn("expenses_mark_paid", str(ctx.exception))
+
+    def test_an_update_on_a_refunded_row_says_which_figure_it_changed(self):
+        e, _p, _l = self.badminton()
+        self.call("expenses_refund", expense_id=e["id"], amount=1800)
+        out = self.call("expenses_update", expense_id=e["id"], amount="3500")
+        self.assertEqual((out["gross_amount"], out["amount"]), (3500.0, 1700.0))
+        self.assertIn("¥1700.00", out["note"])
+        self.assertIn("¥1800.00", out["note"])
+
+    def test_classes_list_is_light_by_default_and_full_when_asked(self):
+        self.badminton()
+        light = self.call("classes_list")
+        self.assertNotIn("events", light["packages"][0])
+        self.assertEqual(light["packages"][0]["events_count"], 5)
+        self.assertIn("2026-09-02", light["packages"][0]["last_event"])
+        self.assertIn("verbose=true", light["note"])
+        full = self.call("classes_list", verbose=True)
+        self.assertEqual(len(full["packages"][0]["events"]), 5)
+        self.assertEqual(self.call("classes_list", query="nothing")["packages"], [])
+        self.assertEqual(len(self.call("classes_list", query="羽毛")["packages"]), 1)
+
+    def test_a_batch_log_says_how_many_it_wrote_and_returns_their_ids(self):
+        _e, _p, logged = self.badminton()
+        self.assertIn("logged 5 classes", logged["note"])
+        self.assertIn("2026-08-17", logged["note"])
+        self.assertEqual(len(logged["logged_events"]), 5)
+        removed = self.call("classes_log_delete", event_id=logged["logged_events"][0]["id"])
+        self.assertIn("removed 2026-08-17", removed["note"])
+        self.assertEqual(removed["summary"]["remaining"], 6)
+
+    def test_a_course_can_be_retired_and_removed_from_the_mcp(self):
+        e, p, _l = self.badminton()
+        retired = self.call("classes_update", query="羽毛球", archived=True)
+        self.assertIn("ARCHIVED", retired["note"])
+        self.assertEqual(self.call("classes_list")["packages"], [])
+        self.assertEqual(len(self.call("classes_list", include_archived=True)["packages"]), 1)
+        gone = self.call("classes_delete", package_id=p["id"], changed_by="Matt")
+        self.assertTrue(gone["deleted"])
+        self.assertIn("5 logged", gone["note"])
+        self.assertIn(e["id"], gone["note"])
+        self.assertEqual(self.call("expenses_history", expense_id=e["id"])["history"][-1]
+                         ["action"], "package_delete")
+        # and now the payment can go
+        self.assertTrue(self.call("expenses_delete", expense_id=e["id"])["deleted"])
+
+    def test_a_search_finds_a_payment_by_the_course_it_funds(self):
+        """'Badminton' in the ledger, 羽毛球 in her head."""
+        self.badminton()
+        self.assertEqual(len(self.call("expenses_list", query="羽毛球")["expenses"]), 1)
+        # …but a write tool still resolves on the payment's own words only
+        self.assertEqual(self.call("expenses_mark_paid", query="羽毛球")["matched"], 0)
+
+    def test_the_new_descriptions_carry_triggers_and_cross_references(self):
+        desc = {
+            t.name: " ".join((t.description or "").split())
+            for t in run(self.mcp.list_tools())
+        }
+        self.assertIn("退了1800", desc["expenses_refund"])
+        self.assertIn("refunded", desc["expenses_refund"])
+        self.assertIn("resize_package_to", desc["expenses_refund"])
+        self.assertIn("expenses_refund_delete", desc["expenses_refund"])
+        self.assertIn("expenses_refund", desc["expenses_update"])
+        self.assertIn("expenses_refund", desc["expenses_delete"])
+        self.assertIn("classes_delete", desc["expenses_delete"])
+        self.assertIn("课时改成5", desc["classes_update"])
+        self.assertIn("archive", desc["classes_update"])
+        self.assertIn("expenses_refund", desc["classes_update"])
+        self.assertIn("classes_log_delete", desc["classes_log"])
+        self.assertIn("dates=", desc["classes_log"])
+        for name in ("classes_update", "classes_delete"):
+            self.assertIn(name, desc["classes_list"])
+        self.assertIn("verbose=true", desc["classes_list"])
+        # the destructive ones say to confirm — that text is the only thing
+        # an assistant reads before calling
+        for name in ("expenses_refund_delete", "classes_delete", "classes_log_delete"):
+            self.assertIn("confirm", desc[name].lower(), name)
+        self.assertIn(".url", desc["expenses_mint_link"])
+        self.assertNotIn("<this service>", desc["expenses_mint_link"])
+
+    def test_the_new_annotations(self):
+        tools = {t.name: t for t in run(self.mcp.list_tools())}
+        self.assertFalse(tools["expenses_refund"].annotations.destructiveHint)
+        self.assertFalse(tools["expenses_refund"].annotations.readOnlyHint)
+        self.assertFalse(tools["classes_update"].annotations.destructiveHint)
+        for name in ("expenses_refund_delete", "classes_delete", "classes_log_delete"):
+            self.assertTrue(tools[name].annotations.destructiveHint, name)
+
+    def test_help_routes_refunds_and_course_edits(self):
+        text = self.call("expenses_help")
+        for anchor in ("expenses_refund(", "退了1800", "resize_package_to",
+                       "expenses_refund_delete", "classes_update(", "archived=true",
+                       "classes_delete(", "classes_log_delete(", "dates=[",
+                       "gross_amount", "EFFECTIVE"):
+            self.assertIn(anchor, text, anchor)
+        fix = run(self.mcp.get_prompt("xiufu"))
+        prompt = " ".join(m.content.text for m in fix.messages if hasattr(m.content, "text"))
+        for anchor in ("expenses_refund", "expenses_refund_delete", "classes_update",
+                       "classes_log_delete"):
+            self.assertIn(anchor, prompt, anchor)
+
+    def test_the_portal_host_reaches_every_channel_when_configured(self):
+        os.environ["PORTAL_BASE_URL"] = "https://family-expenses-test.a.run.app/"
+        try:
+            mcp = build_mcp(make_store())
+            call = lambda tool, **a: tool_payload(run(mcp.call_tool(tool, a)))
+            minted = call("expenses_mint_link", label="wife")
+            self.assertEqual(
+                minted["url"],
+                f"https://family-expenses-test.a.run.app/t/{minted['token']}")
+            self.assertNotIn("PORTAL_BASE_URL", minted["note"])
+            links = call("expenses_list_links")
+            self.assertEqual(links["portal"], "https://family-expenses-test.a.run.app/t/<token>")
+            self.assertIn("family-expenses-test.a.run.app", links["note"])
+            self.assertNotIn(minted["token"], json.dumps(links))
+            self.assertIn("family-expenses-test.a.run.app/t/<token>", call("expenses_help"))
+        finally:
+            os.environ.pop("PORTAL_BASE_URL", None)
+
+    def test_without_a_host_the_tools_say_so_instead_of_pretending(self):
+        os.environ.pop("PORTAL_BASE_URL", None)
+        mcp = build_mcp(make_store())
+        call = lambda tool, **a: tool_payload(run(mcp.call_tool(tool, a)))
+        minted = call("expenses_mint_link", label="wife")
+        self.assertIn("PORTAL_BASE_URL", minted["url"])
+        self.assertIn("PORTAL_BASE_URL", minted["note"])
+        self.assertIsNone(call("expenses_list_links")["portal"])
+        self.assertIn("PORTAL_BASE_URL is not set", call("expenses_help"))
 
 
 class BearerMiddlewareTests(unittest.TestCase):

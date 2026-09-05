@@ -30,6 +30,7 @@ from mcp.types import ToolAnnotations
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from .config import portal_base_url, portal_link
 from .store import (
     BORROW_CATEGORY, CATEGORY_KEYS, Store, ValidationError, _utc_now_iso,
     today_str,
@@ -63,6 +64,26 @@ INTENT → TOOL:
 - "今天上了足球课 / went today" → classes_log(kind="attended")
 - "今天的课取消了 / they cancelled" → classes_log(kind="missed_school")
 - "今天没去 / we skipped" → classes_log(kind="missed_us")
+- "8月17、21、28都上了 / log these three dates" → classes_log(kind=…, dates=[…])
+  — one call, all or nothing
+- "那天没上，记错了 / undo that class / 删掉那条上课记录" →
+  classes_log_delete(event_id=…) — ids from classes_list(verbose=true) or the
+  classes_log result
+- "退了1800 / 退款 / they refunded us 1800 / got money back" →
+  expenses_refund(query=…, amount="1800"). The payment KEEPS its original
+  amount; every total reads amount − refunds. A refund on a course usually
+  means fewer classes: pass resize_package_to=<new class_count> in the SAME
+  call so the per-class rate stays honest (¥3600 for 10 refunded ¥1800 is
+  5 classes at ¥360, not 10 at ¥180)
+- "那个退款记错了 / undo the refund" → expenses_refund_delete(refund_id=…) —
+  confirm first
+- "课时改成5 / 改成5节 / the pack is 5 classes now / rename the course /
+  改名" → classes_update(query=…, class_count=5)
+- "这个课结束了 / 上完了 / archive the course / retire it" →
+  classes_update(query=…, archived=true) — keeps the log, hides it from lists
+- "删掉这个课程 / stop tracking the course / remove the course" →
+  classes_delete(query=…) — confirm first; its class log stays in the
+  payment's expenses_history
 
 CLASS TRACKER — two shapes, and they answer different questions:
 - kind="per_class": a pack of N classes. Attending draws one down. Answers
@@ -93,19 +114,44 @@ an invented key does not vanish — it just is not one of the household's bucket
 RULES OF THUMB:
 - Dates/paid dates: omit them — the server defaults to today in China time.
 - Amounts: pass what the user said — "¥300", "300块", "1,200元" all parse.
+- Every row's `amount` is the EFFECTIVE figure (after refunds); `gross_amount`
+  and `refunded` say what was paid and what came back. expenses_update(amount=)
+  sets the ORIGINAL figure — to change what came back, use the refund tools.
 - Keep the user's own words as the description (don't translate it).
-- query matching: substring on description/category. If a tool returns
-  matched>1 with candidates, show them briefly and ask which; then call again
-  with expense_id. Never guess.
+- query matching: substring on description/category — and for expenses_list
+  also the linked course's name, so "羽毛球" finds a payment described
+  "Badminton". If a tool returns matched>1 with candidates, show them briefly
+  and ask which; then call again with expense_id. Never guess.
 - Pass the speaker's name as submitted_by / changed_by when you know it —
   the family reads the edit history.
 """
 
 
+def _help_text() -> str:
+    """The playbook, with the portal host filled in at build time.
+
+    An assistant that cannot name the portal cannot help anyone reach it:
+    a minted link used to come back as "https://<this service>/t/<token>",
+    which could be neither opened nor forwarded.
+    """
+    base = portal_base_url()
+    portal = (
+        f"PORTAL: the family's phone page is at {base}/t/<token>. "
+        "expenses_mint_link returns the full link; expenses_list_links never "
+        "shows token values."
+        if base else
+        "PORTAL: the phone page is at https://<host>/t/<token>, but "
+        "PORTAL_BASE_URL is not set on this service, so the host cannot be "
+        "named here — ask the owner for it."
+    )
+    return _HELP + "\n" + portal + "\n"
+
+
 def build_mcp(store: Store) -> FastMCP:
+    help_text = _help_text()
     mcp = FastMCP(
         "family-expenses",
-        instructions=_HELP,  # bonus for clients that surface it
+        instructions=help_text,  # bonus for clients that surface it
         stateless_http=True,
         json_response=True,
         host=os.environ.get("HOST", "0.0.0.0"),
@@ -143,7 +189,10 @@ def build_mcp(store: Store) -> FastMCP:
             for e in matches[:8]
         ]
 
-    def _resolve(expense_id: Optional[str], query: Optional[str], *, prefer_unpaid: bool):
+    def _resolve(
+        expense_id: Optional[str], query: Optional[str], *,
+        prefer_unpaid: bool = False, prefer_paid: bool = False,
+    ):
         if expense_id:
             return expense_id, None
         if not query or not str(query).strip():
@@ -156,6 +205,13 @@ def build_mcp(store: Store) -> FastMCP:
             unpaid = [e for e in matches if not e.paid]
             if len(unpaid) == 1:
                 return unpaid[0].id, None
+        if prefer_paid and len(matches) > 1:
+            # the mirror image, for refunds: money comes back on a payment
+            # that went out, so with one paid match among several it is the
+            # one meant
+            paid = [e for e in matches if e.paid]
+            if len(paid) == 1:
+                return paid[0].id, None
         if len(matches) == 1:
             return matches[0].id, None
         if not matches:
@@ -174,8 +230,9 @@ def build_mcp(store: Store) -> FastMCP:
     @mcp.tool(annotations=_READ)
     def expenses_help() -> str:
         """START HERE when unsure. Returns the playbook: which tool for which
-        user phrase (中文/EN), defaults, and how to resolve ambiguity."""
-        return _HELP
+        user phrase (中文/EN), defaults, how to resolve ambiguity, and the
+        portal's address."""
+        return help_text
 
     # ── reads ─────────────────────────────────────────────────────────────
     @mcp.tool(annotations=_READ)
@@ -187,8 +244,13 @@ def build_mcp(store: Store) -> FastMCP:
     ) -> dict[str, Any]:
         """List expenses AND totals. Use for: '我还要付什么/what do I owe'
         (status='unpaid'), '这个月花了多少/how much did we spend' (read
-        .summary), or finding an item ('那个足球的' → query='足球').
+        .summary), or finding an item ('那个足球的' → query='足球'). query
+        matches the description, the category AND the name of the course a
+        payment funds, so '羽毛球' finds a payment described 'Badminton'.
         status: all|paid|unpaid|overdue. since/until: YYYY-MM-DD.
+        Each row's amount is the EFFECTIVE figure after refunds; gross_amount
+        and refunded say what was paid and what came back, .refunds lists each
+        refund with its id (for expenses_refund_delete).
         .summary describes exactly the rows returned; when a filter is applied
         .ledger_total carries the whole-ledger figures for context.
         IN .summary: total/paid/unpaid are HOUSEHOLD SPENDING and leave out
@@ -212,7 +274,8 @@ def build_mcp(store: Store) -> FastMCP:
                 since = store._validate_date(since, field="since")
             if until:
                 until = store._validate_date(until, field="until")
-            expenses = store.find(query, status=status, today=today)
+            expenses = store.find(query, status=status, today=today,
+                                  match_package=True)
             # find() has no date support; applying the range here keeps
             # since/until meaningful instead of silently ignored
             if since:
@@ -279,7 +342,9 @@ def build_mcp(store: Store) -> FastMCP:
         """Check an expense off as paid. Use for: '足球课付了', '交了', 'paid
         the football class', 'settled it'. Target by query (a word from its
         description — unpaid items are preferred) or expense_id. Omit
-        paid_date = today. paid=false undoes a mistaken check-off. To change
+        paid_date = today. paid=false undoes a mistaken check-off — refused
+        on a row with a refund recorded (money came back on it; remove the
+        refund first with expenses_refund_delete). To change
         amount/description instead, use expenses_update."""
         eid, ambiguous = _resolve(expense_id, query, prefer_unpaid=True)
         if ambiguous:
@@ -304,8 +369,11 @@ def build_mcp(store: Store) -> FastMCP:
     ) -> dict[str, Any]:
         """Correct an existing expense. Use for: '改成350', 'actually it was
         350', '不是足球是篮球', wrong date. Target by query or expense_id;
-        pass ONLY the fields that change. To mark paid/unpaid use
-        expenses_mark_paid (this tool cannot set paid). category must be an exact key from expenses_help; 'borrow' means owed back to whoever paid."""
+        pass ONLY the fields that change. amount is the ORIGINAL figure
+        (before any refund) — if money came BACK, use expenses_refund instead
+        of lowering the amount. To mark paid/unpaid use expenses_mark_paid
+        (this tool cannot set paid). category must be an exact key from
+        expenses_help; 'borrow' means owed back to whoever paid."""
         eid, ambiguous = _resolve(expense_id, query, prefer_unpaid=True)
         if ambiguous:
             return ambiguous
@@ -322,8 +390,15 @@ def build_mcp(store: Store) -> FastMCP:
                 "nothing to change — pass amount, description, date or category; "
                 "for paid status use expenses_mark_paid"
             )
-        result = store.update(eid, fields=fields, changed_by=changed_by).to_dict()
+        expense = store.update(eid, fields=fields, changed_by=changed_by)
+        result = expense.to_dict()
         result["note"] = _summary_note() + _category_note(fields.get("category"))
+        if expense.refunded:
+            result["note"] += (
+                f" · NOTE: ¥{expense.refunded:.2f} has been refunded on this "
+                f"row, so its effective amount is ¥{expense.amount:.2f} "
+                f"(original ¥{expense.gross_amount:.2f})"
+            )
         return result
 
     @mcp.tool(annotations=_DESTRUCTIVE)
@@ -334,13 +409,126 @@ def build_mcp(store: Store) -> FastMCP:
     ) -> dict[str, Any]:
         """Remove an expense entirely. Use ONLY for '删掉/delete/不用了 it was
         entered by mistake' — and confirm with the user first. If the expense
-        was simply paid, use expenses_mark_paid instead. The audit history is
-        kept. Target by query or expense_id."""
+        was simply paid, use expenses_mark_paid instead; if money came back,
+        expenses_refund. The audit history is kept. Target by query or
+        expense_id. A payment that funds a course is refused until the course
+        is removed with classes_delete (the error names its package_id)."""
         eid, ambiguous = _resolve(expense_id, query, prefer_unpaid=False)
         if ambiguous:
             return ambiguous
         return {"deleted": store.delete(eid, changed_by=changed_by),
                 "note": _summary_note()}
+
+    # ── refunds ───────────────────────────────────────────────────────────
+    def _refund_note(expense) -> str:
+        return (
+            f"effective amount now ¥{expense.amount:.2f} "
+            f"(¥{expense.gross_amount:.2f} paid, ¥{expense.refunded:.2f} back)"
+        )
+
+    @mcp.tool(annotations=_WRITE)
+    def expenses_refund(
+        amount: Union[str, float],
+        expense_id: Optional[str] = None,
+        query: Optional[str] = None,
+        date: Optional[str] = None,
+        reason: Optional[str] = None,
+        changed_by: Optional[str] = None,
+        resize_package_to: Optional[Union[str, int]] = None,
+    ) -> dict[str, Any]:
+        """Record money that came BACK on a paid expense. Use for: '退了1800',
+        '退款', 'they refunded us 1800', 'got 1800 back', '退了一半'. The
+        original row keeps its amount and dates; the refund is a separate
+        event with its own date (omit date = today), and every total reads
+        amount − refunds. NEVER express a refund by lowering the amount with
+        expenses_update. Target by query (a word from the description — paid
+        rows are preferred) or expense_id. A course funded by the payment is
+        repriced by the refund, so READ THE NOTE: on a per_class pack, pass
+        resize_package_to=<new class_count> when the refund means fewer
+        classes (¥3600 for 10 refunded ¥1800 is 5 at ¥360, not 10 at ¥180) —
+        same transaction. On a period (term) fee a refund usually SETTLES
+        classes the school owed back: record it, then remove those missed
+        classes with classes_log_delete and resize the term to what remains,
+        or 'owed' keeps claiming them. To undo: expenses_refund_delete(
+        refund_id=…) with the id in this result."""
+        eid, ambiguous = _resolve(expense_id, query, prefer_paid=True)
+        if ambiguous:
+            return ambiguous
+        outcome = store.refund(
+            eid, amount=amount, date=date, reason=reason, changed_by=changed_by,
+            resize_package_to=resize_package_to,
+        )
+        expense = outcome["expense"]
+        result = expense.to_dict()
+        result["refund"] = outcome["refund"]
+        note = (
+            f"refund ¥{outcome['refund']['amount']:.2f} recorded on "
+            f"{outcome['refund']['date']} (refund_id={outcome['refund']['id']}) · "
+            + _refund_note(expense)
+        )
+        package = outcome["package"]
+        if package is not None:
+            s = package["summary"]
+            result["package"] = {
+                "id": package["id"], "name": package["name"],
+                "kind": package["kind"], "summary": s,
+                "resized": outcome["resized"],
+            }
+            # the course's figures moved whether or not it was resized — the
+            # reprice must never be silent, on either surface
+            if package["kind"] == "per_class":
+                note += (
+                    f" · {package['name']} "
+                    + ("resized to" if outcome["resized"] else "still")
+                    + f" {s['class_count']} classes, now ¥{s['rate']:.2f} each, "
+                    f"{s['attended']} attended, {s['remaining']} left"
+                    + ("" if outcome["resized"] else
+                       " — if the refund means FEWER classes, call again with "
+                       "resize_package_to (or classes_update) so the rate is "
+                       "honest; ¥{:.2f} over {} classes is what the tracker now "
+                       "says a class cost".format(s["amount"], s["class_count"]))
+                )
+            else:
+                settled = [e for e in package["events"]
+                           if e["kind"] in ("missed_school", "missed_us")]
+                note += (
+                    f" · {package['name']} is a term fee: "
+                    + ("resized to" if outcome["resized"] else "still")
+                    + f" {s['class_count']} classes at ¥{s['rate']:.2f} each, "
+                    f"{s['owed']} owed back = ¥{s['owed_amount']:.2f}"
+                    + ((" — NOTE: if this refund SETTLES those missed classes, "
+                        "remove them with classes_log_delete(event_id=…) "
+                        "so 'owed' stops claiming them: "
+                        + ", ".join(f"{e['date']} {e['kind']} ({e['id']})"
+                                    for e in settled[:8])
+                        + (", …" if len(settled) > 8 else "")
+                        + "; and resize the term to the classes that remain")
+                       if settled else "")
+                )
+        result["note"] = note
+        return result
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    def expenses_refund_delete(
+        refund_id: str, changed_by: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Take back a refund that was recorded by mistake ('那个退款记错了',
+        'undo the refund', 'they did not actually refund it') — confirm with
+        the user first. The refund row is removed and kept in the history;
+        the expense's effective amount goes back up. refund_id comes from the
+        expenses_refund result, from .refunds on an expenses_list row, or from
+        expenses_history (action 'refund'). A course resized alongside the
+        refund is NOT resized back — use classes_update for that."""
+        expense = store.delete_refund(refund_id, changed_by=changed_by)
+        if expense is None:
+            raise ValidationError(
+                f"no refund with id {refund_id!r} — refund ids are in "
+                "expenses_history (action 'refund') and on each row's .refunds "
+                "in expenses_list"
+            )
+        result = expense.to_dict()
+        result["note"] = "refund removed · " + _refund_note(expense)
+        return result
 
     # ── class tracker ─────────────────────────────────────────────────────
     def _resolve_package(package_id: Optional[str], query: Optional[str]):
@@ -423,14 +611,30 @@ def build_mcp(store: Store) -> FastMCP:
         }
 
     @mcp.tool(annotations=_READ)
-    def classes_list(include_archived: bool = False) -> dict[str, Any]:
+    def classes_list(
+        query: Optional[str] = None,
+        include_archived: bool = False,
+        verbose: bool = False,
+    ) -> dict[str, Any]:
         """Prepaid courses and what is left of them. Use for: '还剩几节课/
         how many classes left', '足球还有几次', '这个月缺了几节/how many did we
         miss', 'what do they owe us'. Returns每 package with classes remaining
         and money remaining (per_class), or classes owed back split into
-        reclaimable vs forfeited (period). To start tracking a course use
-        classes_add; to record a class use classes_log."""
-        packages = store.list_packages(include_archived=include_archived)
+        reclaimable vs forfeited (period). query narrows by course name,
+        period label or the payment's description. By default each package
+        carries counts and its last class, not the whole log; pass
+        verbose=true for every event with its event_id (needed for
+        classes_log_delete). To start tracking a course use classes_add; to
+        record a class use classes_log; to edit or retire one, classes_update;
+        to remove one, classes_delete."""
+        packages = store.list_packages(include_archived=include_archived, query=query)
+        if not verbose:
+            for p in packages:
+                events = p.pop("events")
+                p["events_count"] = len(events)
+                p["last_event"] = (
+                    f"{events[0]['date']} · {events[0]['kind']}" if events else None
+                )
         lines = []
         for p in packages:
             s = p["summary"]
@@ -456,8 +660,10 @@ def build_mcp(store: Store) -> FastMCP:
         return {
             "packages": packages,
             "note": ("; ".join(lines) if lines else
-                     "no class packages yet — classes_add starts one from a payment "
-                     "already in the ledger"),
+                     ("no class packages match" if query else "no class packages yet")
+                     + " — classes_add starts one from a payment already in the ledger")
+                    + ("" if verbose else
+                       " · pass verbose=true for the class log with event ids"),
         }
 
     @mcp.tool(annotations=_WRITE)
@@ -468,6 +674,7 @@ def build_mcp(store: Store) -> FastMCP:
         expense_id: Optional[str] = None,
         query: Optional[str] = None,
         period_label: Optional[str] = None,
+        changed_by: Optional[str] = None,
     ) -> dict[str, Any]:
         """Start tracking a prepaid course, FROM a payment already recorded.
         Use for: '足球课交了2200，10节课', 'paid for 10 football classes',
@@ -489,11 +696,19 @@ def build_mcp(store: Store) -> FastMCP:
         package = store.create_package(
             expense_id=eid, name=name, kind=kind,
             class_count=class_count, period_label=period_label,
+            changed_by=changed_by,
         )
         s = package["summary"]
+        x = package["expense"]
         package["note"] = (
             f"tracking {s['class_count']} classes at ¥{s['rate']:.2f} each "
-            f"(¥{s['amount']:.2f} paid). "
+            # the GROSS figure under the word "paid": the effective amount
+            # is what funds the course, but "¥1800 paid" on a ¥3600 payment
+            # is the exact sentence the refund table exists to stop
+            f"(¥{x['gross_amount']:.2f} paid"
+            + (f", ¥{x['refunded']:.2f} refunded, ¥{s['amount']:.2f} effective"
+               if x["refunded"] else "")
+            + "). "
             + ("Log each class with classes_log(kind='attended')."
                if package["kind"] == "per_class" else
                "Log the ones that do NOT happen with classes_log("
@@ -501,35 +716,9 @@ def build_mcp(store: Store) -> FastMCP:
         )
         return package
 
-    @mcp.tool(annotations=_WRITE)
-    def classes_log(
-        kind: str,
-        package_id: Optional[str] = None,
-        query: Optional[str] = None,
-        date: Optional[str] = None,
-        note: Optional[str] = None,
-        logged_by: Optional[str] = None,
-    ) -> dict[str, Any]:
-        """Record one class against a course. Use for: '今天上了足球课/went to
-        football today' (kind='attended'), '今天的课取消了/they cancelled'
-        (kind='missed_school'), '今天没去/we skipped it' (kind='missed_us').
-        Target by query (a word from the course name) or package_id. Omit date
-        = today. On a per_class pack only 'attended' draws a class down; on a
-        period package the missed ones are what is owed back, and the cause
-        decides whether it is reclaimable ('missed_school') or forfeited
-        ('missed_us'). Read the result's note for what is left."""
-        # validate the kind BEFORE resolving the course: it is wrong no matter
-        # which package the agent meant, and reporting "no such course" first
-        # would cost a round trip to discover the real mistake
-        kind = store._validate_event_kind(kind)
-        pid, ambiguous = _resolve_package(package_id, query)
-        if ambiguous:
-            return ambiguous
-        package = store.log_class(
-            package_id=pid, kind=kind, date=date, note=note, logged_by=logged_by
-        )
+    def _class_note(package) -> str:
         s = package["summary"]
-        package["note"] = (
+        return (
             f"{s['remaining']} of {s['class_count']} classes left "
             f"(¥{s['remaining_amount']:.2f})"
             + (f" — NOTE: {s['overrun']} more attended than were paid for"
@@ -539,7 +728,152 @@ def build_mcp(store: Store) -> FastMCP:
             f"({s['reclaimable']} cancelled by them = ¥{s['reclaimable_amount']:.2f} "
             f"reclaimable, {s['forfeited']} skipped by us)"
         )
+
+    @mcp.tool(annotations=_WRITE)
+    def classes_log(
+        kind: str,
+        package_id: Optional[str] = None,
+        query: Optional[str] = None,
+        date: Optional[str] = None,
+        # a list, or one string the store splits ("8-17, 8-21" is what speech
+        # produces) — typed as a list alone, pydantic refused the string with
+        # its own error before the store's coaching could be reached
+        dates: Optional[Union[list[str], str]] = None,
+        note: Optional[str] = None,
+        logged_by: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Record one class — or several dates at once — against a course.
+        Use for: '今天上了足球课/went to football today' (kind='attended'),
+        '今天的课取消了/they cancelled' (kind='missed_school'), '今天没去/we
+        skipped it' (kind='missed_us'), '8月17、21、28都上了/log these dates'
+        (dates=['2026-08-17', …] — one call, all or nothing). Target by query
+        (a word from the course name) or package_id. Omit date = today. On a
+        per_class pack only 'attended' draws a class down; on a period package
+        the missed ones are what is owed back, and the cause decides whether
+        it is reclaimable ('missed_school') or forfeited ('missed_us'). Read
+        the result's note for what is left; .logged_events carries each
+        event's id, and classes_log_delete(event_id=…) takes one back."""
+        # validate the kind BEFORE resolving the course: it is wrong no matter
+        # which package the agent meant, and reporting "no such course" first
+        # would cost a round trip to discover the real mistake
+        kind = store._validate_event_kind(kind)
+        pid, ambiguous = _resolve_package(package_id, query)
+        if ambiguous:
+            return ambiguous
+        package = store.log_class(
+            package_id=pid, kind=kind, date=date, dates=dates, note=note,
+            logged_by=logged_by,
+        )
+        written = package["logged_events"]
+        package["note"] = (
+            (f"logged {len(written)} classes ({', '.join(e['date'] for e in written)}) · "
+             if len(written) > 1 else "")
+            + _class_note(package)
+        )
         return package
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    def classes_log_delete(
+        event_id: str, changed_by: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Take back ONE logged class ('那天没上，记错了', 'undo today's
+        class', 'delete that class record') — confirm with the user first.
+        event_id comes from the classes_log result (.logged_events) or from
+        classes_list(verbose=true). The removed event stays in the funding
+        payment's expenses_history. To remove a whole course use
+        classes_delete instead."""
+        package = store.delete_class_event(event_id, changed_by=changed_by)
+        if package is None:
+            raise ValidationError(
+                f"no class event with id {event_id!r} — event ids come from "
+                "classes_list(verbose=true) or the result of classes_log"
+            )
+        ev = package["unlogged_event"]
+        package["note"] = (
+            f"removed {ev['date']} · {ev['kind']} from {package['name']} · "
+            + _class_note(package)
+        )
+        return package
+
+    @mcp.tool(annotations=_WRITE)
+    def classes_update(
+        package_id: Optional[str] = None,
+        query: Optional[str] = None,
+        class_count: Optional[Union[str, int]] = None,
+        name: Optional[str] = None,
+        kind: Optional[str] = None,
+        period_label: Optional[str] = None,
+        archived: Optional[bool] = None,
+        changed_by: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Edit a course — never its money. Use for: '课时改成5/改成5节/the
+        pack is 5 classes now' (class_count), '改名/rename it' (name),
+        '这个课结束了/上完了/archive the course/retire it' (archived=true;
+        keeps the log, hides it from classes_list unless include_archived),
+        or a period label (period_label='' clears it). Target by query (a
+        word from the course name) or package_id; pass ONLY the fields that
+        change. The per-class rate is
+        recomputed from the payment ÷ class_count — to change the money, edit
+        the payment (expenses_update) or record a refund (expenses_refund,
+        which can resize in the same call). Shrinking below the classes
+        already logged is refused and the error names them. kind cannot change
+        once anything is logged."""
+        pid, ambiguous = _resolve_package(package_id, query)
+        if ambiguous:
+            return ambiguous
+        fields = {
+            k: v
+            for k, v in {
+                "class_count": class_count, "name": name, "kind": kind,
+                "period_label": period_label, "archived": archived,
+            }.items()
+            if v is not None
+        }
+        if not fields:
+            raise ValidationError(
+                "nothing to change — pass class_count, name, kind, period_label "
+                "or archived; the money lives on the payment (expenses_update)"
+            )
+        package = store.update_package(pid, fields=fields, changed_by=changed_by)
+        s = package["summary"]
+        package["note"] = (
+            f"{package['name']}: {s['class_count']} classes at ¥{s['rate']:.2f} each"
+            + (" · ARCHIVED (hidden from classes_list unless include_archived=true)"
+               if package["archived"] else "")
+            + " · " + _class_note(package)
+        )
+        return package
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    def classes_delete(
+        package_id: Optional[str] = None,
+        query: Optional[str] = None,
+        changed_by: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Stop tracking a course entirely ('删掉这个课程', 'remove the
+        course', 'stop tracking it') — confirm with the user first, naming
+        the course and how many classes are logged. The class log is kept in
+        the funding payment's expenses_history, and the payment itself stays
+        in the ledger. If the course merely finished, prefer
+        classes_update(archived=true). Target by query or package_id."""
+        pid, ambiguous = _resolve_package(package_id, query)
+        if ambiguous:
+            return ambiguous
+        package = store.package(pid)
+        deleted = store.delete_package(pid, changed_by=changed_by)
+        return {
+            "deleted": deleted, "package_id": pid, "name": package["name"],
+            "expense_id": package["expense_id"],
+            "note": (
+                f"{package['name']} removed with {len(package['events'])} logged "
+                f"class(es) — all kept in expenses_history(expense_id="
+                f"{package['expense_id']!r}). The payment "
+                f"¥{package['expense']['gross_amount']:.2f}"
+                + (f" (¥{package['expense']['refunded']:.2f} refunded)"
+                   if package["expense"]["refunded"] else "")
+                + " is still in the ledger."
+            ),
+        }
 
     # ── link management ───────────────────────────────────────────────────
     @mcp.tool(annotations=_READ)
@@ -569,11 +903,15 @@ def build_mcp(store: Store) -> FastMCP:
                 "created_at": r["created_at"],
             })
         active = sum(1 for x in links if x["status"] == "active")
+        base = portal_base_url()
         return {
             "links": links,
+            "portal": f"{base}/t/<token>" if base else None,
             "note": (
                 f"{active} active link(s). Token values are never listed — "
                 "revoke with expenses_revoke_link(token_or_id=<the id above>). "
+                + (f"The portal is at {base}/t/<token>. " if base else
+                   "PORTAL_BASE_URL is not set, so the host cannot be named here. ")
                 + ("Revoked links hidden; pass include_revoked=true to see them."
                    if not include_revoked else "")
             ),
@@ -585,8 +923,19 @@ def build_mcp(store: Store) -> FastMCP:
     ) -> dict[str, Any]:
         """Create a portal link for a family member ('给我老婆做个链接' /
         'make a link for my wife'). Never expires unless expires_days is set.
-        Tell the user the URL is https://<this service>/t/<token>."""
-        return store.mint_token(label=label, expires_days=expires_days)
+        Returns .url, the full https://<host>/t/<token> link to hand over —
+        it is a permanent credential, so only mint when asked. To see or
+        revoke existing links use expenses_list_links / expenses_revoke_link."""
+        minted = store.mint_token(label=label, expires_days=expires_days)
+        minted["url"] = portal_link(minted["token"])
+        minted["note"] = (
+            "send .url to the family member; it never expires"
+            + (" (expires_days was set, so it does)" if minted["expires_at"] else "")
+            + ("" if portal_base_url() else
+               " — PORTAL_BASE_URL is not set on this service, so .url carries a "
+               "placeholder host; ask the owner for the real one")
+        )
+        return minted
 
     @mcp.tool(annotations=_DESTRUCTIVE)
     def expenses_revoke_link(token_or_id: str) -> dict[str, Any]:
@@ -639,10 +988,15 @@ def build_mcp(store: Store) -> FastMCP:
             "used> — and locate the item(s); show what you found; (2) if "
             "unclear which item, ask, showing the candidates; (3) apply the "
             "fix: wrong amount/text/date → expenses_update; wrongly marked "
-            "paid → expenses_mark_paid(paid=false); duplicate/mistake → "
-            "expenses_delete after explicit confirmation; (4) if the user "
-            "disputes what happened, call expenses_history for that item and "
-            "explain who changed what, when. Never delete without asking."
+            "paid → expenses_mark_paid(paid=false); money came back → "
+            "expenses_refund (never lower the amount for a refund); a refund "
+            "recorded wrongly → expenses_refund_delete; a course with the "
+            "wrong class count → classes_update; a class logged by mistake → "
+            "classes_log_delete; duplicate/mistake → expenses_delete after "
+            "explicit confirmation; (4) if the user disputes what happened, "
+            "call expenses_history for that item and explain who changed "
+            "what, when — it also lists the course's own changes. Never "
+            "delete without asking."
             + (f"\n\nThe problem: {problem}" if problem else "")
         )
 

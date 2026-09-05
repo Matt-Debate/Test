@@ -445,7 +445,9 @@ class SummaryMatchesTheRowsTests(unittest.TestCase):
 
     def test_overdue_status_filter(self):
         self.store.create(date="2026-07-01", amount=500, category="utilities")
-        overdue = self.store.list(status="overdue")
+        # a fixed clock: the fixture's 2026-08-20 rows went overdue on their
+        # own on 2026-08-21 and the assertion started failing a month later
+        overdue = self.store.list(status="overdue", today="2026-08-11")
         self.assertEqual([e.date for e in overdue], ["2026-07-01"])
 
     def test_invalid_status_coaches_the_caller(self):

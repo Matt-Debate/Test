@@ -84,9 +84,19 @@ def api_list(store: Store, body: dict) -> tuple[int, dict]:
         until=body.get("until"),
         today=today,
     )
+    # which course a payment funds, so a row can say so and the refund box
+    # can offer to resize it in the same call. One cheap query, merged here
+    # rather than carried on the Expense: the MCP answers that question with
+    # classes_list, and a snapshot need not repeat the course on every edit
+    packages = store.packages_by_expense()
+    rows = []
+    for e in expenses:
+        row = e.to_dict()
+        row["package"] = packages.get(e.id)
+        rows.append(row)
     return 200, {
         "ok": True,
-        "expenses": [e.to_dict() for e in expenses],
+        "expenses": rows,
         # summarize the rows we are actually returning: a filtered list under a
         # whole-ledger headline is a wrong number in the most visible place
         "summary": store.summarize(expenses, today=today),
@@ -152,6 +162,46 @@ def api_history(store: Store, body: dict) -> tuple[int, dict]:
 
 
 @_guard
+def api_refund(store: Store, body: dict) -> tuple[int, dict]:
+    """Money that came back on a payment — recorded, never written down.
+
+    ``resize_package_to`` resizes the funded course in the same transaction.
+    The portal sends it only when the row funds a per-class pack and she
+    changed the figure; an absent or blank value records the refund alone.
+    """
+    resize = body.get("resize_package_to")
+    if resize in ("", None):
+        resize = None
+    result = store.refund(
+        str(body.get("id")),
+        amount=body.get("amount"),
+        date=body.get("date"),
+        reason=body.get("reason"),
+        changed_by=_author(body, "changed_by"),
+        resize_package_to=resize,
+    )
+    return 200, {
+        "ok": True,
+        "expense": result["expense"].to_dict(),
+        "refund": result["refund"],
+        # the funded course, resized or not, so the confirmation can quote
+        # the rate the refund left it with
+        "package": result["package"],
+        "resized": result["resized"],
+    }
+
+
+@_guard
+def api_refund_delete(store: Store, body: dict) -> tuple[int, dict]:
+    expense = store.delete_refund(
+        str(body.get("refund_id")), changed_by=_author(body, "changed_by")
+    )
+    if expense is None:
+        raise NotFoundError(body.get("refund_id"))
+    return 200, {"ok": True, "expense": expense.to_dict()}
+
+
+@_guard
 def api_classes_list(store: Store, body: dict) -> tuple[int, dict]:
     packages = store.list_packages(
         include_archived=bool(body.get("include_archived"))
@@ -188,6 +238,7 @@ def api_classes_add(store: Store, body: dict) -> tuple[int, dict]:
         kind=body.get("kind"),
         class_count=body.get("class_count"),
         period_label=body.get("period_label"),
+        changed_by=_author(body, "changed_by"),
     )
     return 200, {"ok": True, "package": package}
 
@@ -198,6 +249,9 @@ def api_classes_log(store: Store, body: dict) -> tuple[int, dict]:
         package_id=str(body.get("package_id")),
         kind=body.get("kind"),
         date=body.get("date"),
+        # the batch form too: dropped here, a body carrying `dates` logged ONE
+        # class for today — a silently ignored parameter is a wrong write
+        dates=body.get("dates"),
         note=body.get("note"),
         logged_by=_author(body, "logged_by"),
     )
@@ -206,9 +260,12 @@ def api_classes_log(store: Store, body: dict) -> tuple[int, dict]:
 
 @_guard
 def api_classes_unlog(store: Store, body: dict) -> tuple[int, dict]:
-    if not store.delete_class_event(str(body.get("event_id"))):
+    package = store.delete_class_event(
+        str(body.get("event_id")), changed_by=_author(body, "changed_by")
+    )
+    if package is None:
         raise NotFoundError(body.get("event_id"))
-    return 200, {"ok": True}
+    return 200, {"ok": True, "package": package}
 
 
 @_guard
@@ -216,13 +273,17 @@ def api_classes_update(store: Store, body: dict) -> tuple[int, dict]:
     fields = body.get("fields")
     if not isinstance(fields, dict):
         raise ValidationError("fields object is required")
-    package = store.update_package(str(body.get("id")), fields=fields)
+    package = store.update_package(
+        str(body.get("id")), fields=fields, changed_by=_author(body, "changed_by")
+    )
     return 200, {"ok": True, "package": package}
 
 
 @_guard
 def api_classes_delete(store: Store, body: dict) -> tuple[int, dict]:
-    if not store.delete_package(str(body.get("id"))):
+    if not store.delete_package(
+        str(body.get("id")), changed_by=_author(body, "changed_by")
+    ):
         raise NotFoundError(body.get("id"))
     return 200, {"ok": True}
 
@@ -240,4 +301,6 @@ HANDLERS = {
     "mark-paid": api_mark_paid,
     "delete": api_delete,
     "history": api_history,
+    "refund": api_refund,
+    "refund-delete": api_refund_delete,
 }

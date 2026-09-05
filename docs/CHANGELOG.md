@@ -7,6 +7,237 @@ to a release entry when a chunk set ships.
 
 Nothing pending.
 
+## [0.13.0] — 2026-09-05
+
+A day of live use found the class tracker could not express a refund. A
+prepaid 1:1 badminton pack — ¥3,600, ten classes, five attended — was half
+refunded, and the ¥1,800 bought a group pack instead. The group half was two
+tool calls. The 1:1 half had no path at all: no way to change a course's class
+count, no way to remove a course from the MCP (the refusal pointed at "the
+Classes tab in the portal", which the agent cannot reach), no way to name the
+portal, no refund. The course and the payment were deleted by hand and rebuilt:
+a new id, a new `created_at`, five attendance events created a month after
+their dates, and a ledger claiming he paid ¥1,800 on a day he paid ¥3,600.
+`docs/LESSONS.md` §15 records the shape of it.
+
+Cut as a **minor**: five new tools, a new table, the first in-place
+constraint change, and a portal she will see change. Nothing in §5.1 moves —
+same service, same `/t/<token>`, same open `/mcp`.
+
+### Added
+- **Refunds, as their own fact.** `expense_refunds` holds amount, date,
+  reason and author against a paid row; the row keeps its amount and dates.
+  Every read now exposes the **effective** figure under the existing name
+  `amount`, with `gross_amount` and `refunded` beside it — deliberately under
+  the existing key, because nine portal sites and three store sites already
+  sum `amount`, and a net figure under a new name would have been a place for
+  each of them to forget (which is how borrow took three releases). The two
+  writes that round-trip an amount — `expenses_update(amount=)` and the
+  portal's edit box — use the gross figure and refuse to go below what came
+  back. A refund cannot exceed what is left, cannot land on an unpaid row
+  (that is a price change), and reduces its row in the row's own month: the
+  refund date is recorded and shown, but there is no September credit,
+  because every tab buckets by row and a dated credit would be a negative
+  row. Net is computed in Python in cents, never in float4 SQL.
+- **`expenses_refund(expense_id|query, amount, date?, reason?, changed_by?,
+  resize_package_to?)`** — prefers the paid match; `resize_package_to`
+  changes the funded course's class count **in the same transaction**, since
+  a refund on a course nearly always means fewer classes and the two halves
+  applied separately reprice a ¥360 class at ¥180. **`expenses_refund_delete
+  (refund_id)`** is the undo; without one a wrong refund would be fixed by
+  deleting the payment.
+- **`classes_update(package_id|query, class_count?, name?, kind?,
+  period_label?, archived?)`** — the core miss. Shrinking below the classes
+  already logged (attended on a pack, missed on a period fee) is refused and
+  the error names the conflicting classes with their event ids; exactly the
+  logged count passes, which is the refund case. `archived` was threaded
+  through everything since v0.10.0 and settable by nothing; it is now.
+- **`classes_delete(package_id|query)`** and **`classes_log_delete(event_id)`**,
+  both destructive-flagged with "confirm first" in the description. The
+  delete-refusal on a funding payment now names
+  `classes_delete(package_id=…)` instead of the portal. No cascade on
+  `expenses_delete`: a cascade on a fuzzy `query` target is the largest blast
+  radius available here, and the two-step costs one round trip.
+- **`classes_log(dates=[…])`** — restoring a term was five round trips. All
+  or nothing; a comma-separated string is tolerated.
+- **The class tracker writes history.** `package_create`, `package_update`,
+  `package_delete`, `class_log` and `class_unlog` rows land in
+  `expense_history` under the payment that funds the course (a package is 1:1
+  with its expense and never re-pointed), with the author. A
+  `package_delete` snapshot carries every logged class, so removing a course
+  destroys nothing. Closes `docs/BACKLOG.md` §3.
+- **The portal host reaches the agent.** `expenses_mint_link` returns `.url`
+  — the full `https://<host>/t/<token>` from `PORTAL_BASE_URL`, the same value
+  the Auth0 redirect already used (now read in one place, `app/config.py`);
+  `expenses_list_links` and `expenses_help` name the host and never a token.
+  When the variable is unset the tools say so rather than printing a
+  placeholder that looks like a URL.
+- **`classes_list(query?, verbose=False)`** — the default drops each
+  package's event array (it was the heaviest call on the server) for a count
+  and the last class; `verbose=true` returns every event with its id.
+  **`expenses_list(query=)`** also matches the name and period label of the
+  course a payment funds, so "羽毛球" finds a payment described "Badminton".
+  The write-side resolver is unchanged (`docs/BACKLOG.md` §5 explains why).
+- **Her side of all of it.** She is the one the coach hands a refund to, and
+  without a portal counterpart the thing she would do is edit the amount
+  down. A paid row now offers **退款**: amount, date, reason and — when the
+  payment funds a per-class course — 课时改为, prefilled with the current
+  count and sent only when she changes it. The row shows the effective amount
+  with 原价 and 退款 beneath it, lists each refund with an × that asks before
+  undoing, and the edit box prefills the **original** amount under a label
+  that says so. Each course gains 编辑 (name, count, period label — never the
+  money), 结课 (asks first) and 恢复; finished courses move to a collapsed
+  已结课 group at the foot of the tab rather than vanishing, because the tab
+  had hidden archived rows since v0.10.0 and nothing had ever been able to set
+  the flag. The history box speaks each action's language: a refund is its
+  amount and date, a course its name and count, a class its date.
+  `/api/refund` and `/api/refund-delete` are new; `/api/list` rows carry
+  `package` and `refunds`.
+
+### Changed
+- **`expense_history.action` is wider**, and that is the first change this
+  project has made to a live table that `CREATE TABLE IF NOT EXISTS` cannot
+  express. `Database._migrate_history_actions()` runs at startup, driven by
+  inspecting the live constraint rather than a version number, so it is
+  idempotent and needs no migrations table: Postgres drops and re-adds the
+  check in one transaction; sqlite rebuilds the table in place inside one
+  BEGIN/COMMIT. Best-effort like the hardening file — a live portal must
+  boot — but not silent: if it did not apply, the store refuses **every
+  write that needs a new action — refunds, course edits, and her class
+  logging, which wrote no history before this release and worked** — with a
+  message that opens in her language ("记录暂时保存不了…请告诉 Matt") and
+  carries the operator detail after it, and writes nothing. `smoke_live.py`
+  now gates on `history_actions_missing()` so a failed migration fails the
+  post-deploy smoke by name. Rehearsed against an old-shaped sqlite database
+  in the suite and against a local Postgres by hand: the auto-named
+  constraint, the drop-and-add, idempotency, every new SQL path, and the
+  seq-collision refusal with the connection recovering afterwards.
+- **Refund amounts are rounded to cents at the write.** `_validate_amount`
+  never rounds (a deliberate compatibility choice for `expenses.amount`),
+  and every read rounds a refund for display while the effective amount sums
+  the stored values — so two ¥100.005 refunds listed as ¥100.00 each under a
+  ¥200.01 refunded figure. `expense_refunds` has no legacy rows, so rounding
+  here changes nothing that exists. Found by the structural review.
+- **A refunded row cannot go back to unpaid.** `mark_paid(paid=False)` had no
+  refund guard, so 取消已付 on a ¥3,600 row refunded ¥1,800 put **¥1,800 on
+  the 待付 card** for a bill nothing had moved on. The store now refuses it
+  (the mirror of refund()'s own rule: money cannot have come back on an
+  unpaid bill) and names `expenses_refund_delete`; the portal omits the
+  button on such rows, the listed refunds' × being the way back. Found by
+  the semantic review.
+- **Her refund box can no longer reprice a pack silently.** Its zero-effort
+  path — amount, save — left the count alone, which is a real choice but was
+  a silent one: ¥1,800 over ten classes reads ¥180 a class, the exact figure
+  this release exists to prevent, and nothing on her surface said so. The
+  box now shows, live as she types, what the course will say after the
+  refund (每节 / 剩), and the confirmation quotes the **server's** rate and
+  classes left whether or not she resized. `/api/refund` and
+  `Store.refund()` return the funded course either way, with `resized`.
+- **A refund on a term fee is explained, not just recorded.** On a `period`
+  package a refund usually settles classes the school owed back, and no
+  value of `resize_package_to` can express that: `owed_amount` is derived
+  from the missed events, so the natural resize left it unchanged and a
+  smaller one *raised* it. The `expenses_refund` note and description, and
+  a hint in her refund box, now say to remove the settled missed classes
+  (`classes_log_delete`, named with their ids) and resize the term to what
+  remains; a store test pins the consistent end state (¥2,000 for 8,
+  3 cancelled, ¥750 back → 5 classes at ¥250, owed ¥0). Found by the
+  semantic review.
+- **A borrow row cannot be refunded.** The store accepted one while the
+  portal hid the button, and a comment claimed a server refusal that did not
+  exist (LESSONS §9). Now refused with coaching; the real gap — a partial
+  repayment of money she fronted — is filed as `docs/BACKLOG.md` §11.
+- **`classes_log(dates=[])` no longer logs today**, and a batch that repeats
+  a day is refused: an empty list is a caller that named no class, and a
+  money-moving write from it is nobody's intent. The comma-separated string
+  form now actually reaches the store — the tool parameter was typed as a
+  list alone, so pydantic refused the string before the coaching could.
+- **Concurrent writes that read `SUM(refunds)` are serialised on Postgres**
+  with a row lock on the payment, taken before the read in `refund()` (the
+  "more than is left" check), in `update(amount=)` (the floor at what came
+  back) and in `mark_paid(paid=False)` (the refunded-row refusal); nothing in
+  the schema bounds the sum of refunds by the amount, and two in the same
+  instant could have driven the effective figure negative or left an unpaid
+  row with a refund on it. sqlite is serialised already, so the suite cannot
+  see this; it was probed by hand on a local Postgres with two threads.
+- **The tool-count parity guard was blind to three of the five docs it
+  named.** Its regex matched "18 tools" and not "Tools (18)" or "inventory
+  (18)", so the runbook, contract and MCP design passed vacuously — through
+  the release that changed all three (the third review mutated them to 7 and
+  the test stayed green; LESSONS §13). It now matches every form and refuses
+  a doc that yields no claim. `StringTableParityTests` likewise evaluates the
+  whole portal string table under node — the top-level guard stopped at
+  `cat:{`, below which the seven new history-action labels sat unguarded.
+- **Two notes printed the net figure under the word "paid"** — `classes_add`
+  ("¥1800.00 paid" on a ¥3,600 payment) and `classes_delete`. Both quote the
+  gross figure now, with the refund beside it.
+- **`smoke_live.py` left a ¥1,000 unpaid row and a live course in her tabs on
+  every run** since v0.11.0: the course payment's id was never added to the
+  cleanup list, and the delete would have been refused anyway. It now removes
+  the course first with `classes_delete`, and exercises a refund and its undo
+  against production.
+- **Found by the cross-model review** (P8: a distinct gate, after three
+  same-model rounds had read the same handler): **her refund save had no
+  in-flight lock.** The store accepts a second refund equal to what is left,
+  so two fast taps on 记录退款 wrote two refund rows — ¥100 meant, ¥200 back.
+  It now has the class log's lock: one request per row, released on the
+  answer, never by a timer; a lost response keeps the row locked until
+  reload (LESSONS §6) — and it releases only after the re-render, since
+  until `/api/list` answers the old box is still on screen with a cleared
+  amount field (pinned on real promises by `RefundReleaseOrderTests`).
+  **`/api/classes-log` dropped a `dates` list** and logged one class for
+  today; it forwards it now, all or nothing, and a batch is capped at the
+  same 1,000 as a class count (50,000 dates wrote 50,000 rows in under a
+  second). **The raw API took `archived: "false"` as true** (`bool("false")`);
+  only a boolean or its words are accepted.
+- A history-seq collision (two writes to one payment in the same instant,
+  now reachable from her phone through the class tracker) reads as a 400
+  "reload and try again" rather than a driver traceback, and rolls the whole
+  write back.
+- `Store.delete_class_event` returns the course's payload rather than a bool;
+  `/api/classes-unlog` returns the package. `create_package`,
+  `update_package`, `delete_package` and `delete_class_event` take
+  `changed_by`; the API stamps the link's label as before.
+- `find()`'s SELECT qualifies every column: with the optional package join,
+  an unqualified `id` is an ambiguity error on both drivers.
+
+### Fixed
+- `test_overdue_status_filter` read the real clock; its 2026-08-20 fixture
+  rows went overdue on their own and the suite had been red since 2026-08-21.
+  It now passes a fixed today.
+- **Found in the browser, not by the suite:** every tap on the Classes tab
+  rebuilds it, and a rebuilt `<details>` is closed — so opening a finished
+  course collapsed the 已结课 group it sits in, under her finger. The open
+  state is now read from the element on screen before the re-render
+  (LESSONS §5: the thing she can see is the truth), pinned by
+  `test_the_finished_group_stays_open_across_the_re_render_a_tap_causes`.
+  The node harness could not see this because a rendering test paints once;
+  the real page paints on every tap.
+
+### Tests
+- 377 → 491. `tests/test_refunds.py` (store: the day replayed, the
+  effective amount reaching every total and the course rate, a sweep over
+  non-dividing amounts, refund+resize atomicity — a refused resize takes the
+  refund down with it — the audit rows, the shrink rule naming the events,
+  batch logging all-or-nothing, the migration on an old-shaped database, the
+  unmigrated fail-closed path, the seq collision); `RefundAndCourseToolTests`
+  (the acceptance test verbatim through the tools, the delete-refusal naming
+  the tool and the id, the shrink rule at the tool boundary, descriptions,
+  annotations, help, personas, the host in every channel and its absence);
+  `RefundApiTests`; and under node, executing the real functions:
+  `RefundRowRenderingTests` (net/原价/退款, the button only where money
+  could come back, the edit prefill from gross, the refund box's resize only
+  for a per-class course, `refundBody` sending the count only when changed,
+  history lines per action, escaping of every new interpolation),
+  `RefundHandlerTests`, `ClassArchivePartitionTests` (membership, not
+  presence) and `ClassEditHandlerTests` (including the guard that an unknown
+  button never falls through into a class log).
+
+### Docs
+- `docs/LESSONS.md` §15; `docs/BACKLOG.md` §3 closed, §2 and §5 annotated;
+  contract §4/§6/§7/§8; `docs/MCP_DESIGN.md` inventory (18);
+  `docs/RUNBOOK.md` §3, §4 and §6 (the migration and how to check it).
+
 ## [0.12.0] — 2026-08-11
 
 A production report: she added a ¥1,980 football course for 10月 and it was

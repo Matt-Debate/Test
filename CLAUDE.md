@@ -67,6 +67,12 @@ A **class package** stores no money: its rate is `expense.amount / class_count`,
 derived at read time. `Store.summarize_package(package, amount, events)` is the ONE implementation
 of that arithmetic, amounts are exact ratios (never a rounded rate × n), and
 logging a class moves no expense total — consumption is not spending.
+A **refund** is an `expense_refunds` row, never a write-down of the payment:
+the stored `amount` stays gross, and every read exposes the **effective**
+figure (gross − refunds) under the name `amount`, with `gross_amount` and
+`refunded` beside it — so no total, chart or course rate can forget a refund.
+The two writes that round-trip an amount (`update(amount=…)`, the portal edit
+box) use the gross figure and refuse to go below what came back.
 
 **P5 — Verify that your edit landed, and that your check could have failed.**
 Scripted string replacements here have twice reported success and changed
@@ -106,7 +112,7 @@ transcript, a commit, or a doc. Pipe secrets straight into env vars
 ## Commands
 
 ```bash
-python3 -m unittest discover -s tests     # 377 tests, sqlite, no DB server
+python3 -m unittest discover -s tests     # 491 tests, sqlite, no DB server
 python3 -m app.main                       # local run, http://localhost:8080
 PORTAL_DEV_RELOAD=1 python3 -m app.main   # …and re-read portal.html per request
 python3 scripts/mint_link.py --label X --base-url URL   # mint portal link
@@ -118,10 +124,11 @@ scripts/deploy.sh --dry-run               # inspect; drop the flag to deploy
 
 | path | what |
 |---|---|
-| `app/store.py` | ALL reads/writes; every mutation writes an `expense_history` row in the same transaction; `summarize()` / `summarize_package()`; token mint/validate/revoke |
-| `app/db.py` | portable layer: Postgres (`DATABASE_URL`) / sqlite (tests, shared locked conn); `:name` params both drivers |
+| `app/store.py` | ALL reads/writes; every mutation — expense, refund, or class-tracker — writes an `expense_history` row in the same transaction, keyed by the payment; `summarize()` / `summarize_package()`; `refund()` (+ resize in one tx); token mint/validate/revoke |
+| `app/db.py` | portable layer: Postgres (`DATABASE_URL`) / sqlite (tests, shared locked conn); `:name` params both drivers; `_migrate_history_actions()` — the one in-place constraint change, inspection-driven and idempotent |
+| `app/config.py` | `PORTAL_BASE_URL` in one place: the Auth0 redirect and the MCP's full portal link read the same value |
 | `app/web.py` + `api.py` + `portal.html` | `/t/<token>` bilingual four-tab portal (due · classes · history · stats) + `POST /api/*` (token revalidated every request) |
-| `app/mcp_server.py` | 13 tools + 记账/对账/修复 persona prompts + optional bearer middleware |
+| `app/mcp_server.py` | 18 tools + 记账/对账/修复 persona prompts + optional bearer middleware |
 | `app/auth.py` | portal Auth0 login; inert unless all four `AUTH0_*`/`SESSION_SECRET` vars are set. Guards the portal only, never `/mcp` |
 | `app/main.py` | one service: portal + API + `/mcp`; env `DATABASE_URL`, `APP_TZ`, `MCP_SECRET` (leave unset), `PORT`, `PORTAL_DEV_RELOAD` |
 | `db/schema.sql` | portable DDL, applied idempotently at startup; **first breaking change must start dated migration files** |

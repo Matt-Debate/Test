@@ -70,15 +70,40 @@ for the whole round trip, stalling every concurrent `/api/*` request and
 this is a latency wart, not an outage.
 
 **Fix.** Make each tool `async def` and `await run_in_threadpool(...)` around the
-store calls, or wrap the bodies in `anyio.to_thread.run_sync`. Ten small edits;
-none of them touch the `/mcp` mount path, its no-auth posture, or any tool
-signature, so §5.1 is not engaged. Worth doing next time the MCP surface is open
-for other reasons rather than on its own.
+store calls, or wrap the bodies in `anyio.to_thread.run_sync`. Now eighteen
+small edits; none of them touch the `/mcp` mount path, its no-auth posture, or
+any tool signature, so §5.1 is not engaged. Worth doing next time the MCP
+surface is open for other reasons rather than on its own.
 
-## 3. The class tracker has no audit trail, and no way to retire a course
+**2026-09-05:** the surface was open for v0.13.0 and this was deliberately
+left alone — that release already carried five new tools, a refund table and
+the first in-place constraint change, and LESSONS §1 is about what happens
+when one more mechanism rides along with a money change. Still open.
 
-**Filed 2026-08-11** during the review of v0.10.0. Priority: low, but it is a
-real asymmetry with how the rest of this app treats money.
+## 3. ~~The class tracker has no audit trail, and no way to retire a course~~ — CLOSED
+
+**Filed 2026-08-11** during the review of v0.10.0. **Closed 2026-09-05** in
+v0.13.0, the day the missing tools cost a destroy-and-rebuild of a live course
+(`docs/LESSONS.md` §15).
+
+Every package mutation now writes an `expense_history` row under the payment
+that funds the course — `package_create`, `package_update`, `package_delete`
+(every event in the snapshot), `class_log`, `class_unlog` — with the author.
+`archived` is reachable from both sides: `classes_update(archived=true)` and
+the portal's 结课 button, with finished courses shown in their own 已结课
+group rather than hidden. `classes_update`, `classes_delete` and
+`classes_log_delete` exist, and the delete-refusal on a funding payment names
+`classes_delete(package_id=…)`. **Still open from this entry:** server error
+strings are English only — with exactly one exception, the migration
+refusal in `_write_history`, which opens in Chinese because it reaches her
+phone on a path that worked before v0.13.0; everything else is unchanged,
+since a half-fix here would be the wrong shape — and a borrow-funded package
+remains coherent-but-unexplained.
+
+The original entry follows.
+
+**Priority was:** low, but a real asymmetry with how the rest of this app
+treats money.
 
 Every expense mutation writes an `expense_history` row in the same transaction.
 Class packages write none: `create_package`, `update_package`, `delete_package`,
@@ -150,6 +175,12 @@ pattern that caused those. It wants its own change and its own review round.
 **Watch for:** the fix must keep `expenses_list(query=…)` matching categories —
 searching by bucket is a legitimate read. Only the single-match *resolution*
 used by write tools needs the tier.
+
+**2026-09-05:** v0.13.0 widened the READ side further — `expenses_list(query=)`
+also matches the name and period label of the course a payment funds, so
+"羽毛球" finds a payment described "Badminton" (`Store.find(match_package=True)`).
+The write-side resolver was deliberately left exactly as it was, for the reason
+above; this entry is unchanged.
 
 ## 6. `classes_log` has no idempotency, so a retry cannot be made safe
 
@@ -318,4 +349,31 @@ ceiling is ¥1e12, where the error is ~¥4,096. A fix is `NUMERIC(14,2)`, which
 is a typed migration against a live table and the first breaking schema change
 this project would make (`db/schema.sql` says dated migration files start
 there). Not worth doing for a household ledger whose largest row is ¥31,100 —
-worth knowing before anyone raises that ceiling.
+worth knowing before anyone raises that ceiling. **v0.13.0 adds a sibling:**
+`expense_refunds.amount` is `REAL` too and `refunded` is `SUM()` of it in
+SQL (float4 on Postgres, float8 on sqlite — the suite cannot see the
+difference); refunds are rounded to cents at the write and the net is rounded
+again in Python, so the residue is bounded the same way and by the same
+ceiling.
+
+## 11. A partial repayment of money she fronted has no primitive
+
+**Filed 2026-09-05** by both review rounds of v0.13.0. Priority: low until it
+happens; it is the one event on a `borrow` row neither surface can express.
+
+A `category='borrow'` row is money she paid out and is owed back: unpaid means
+still owed, `mark_paid` means repaid in full. If part of it comes back — ¥2,000
+of a ¥5,000 loan — there is no way to say so. `Store.refund()` refuses borrow
+rows outright (a refund is money coming back on household spending; on a loan
+the same words mean the opposite), and the portal offers no 退款 button on
+them, so the two surfaces agree — but what is left to her is the rewrite
+LESSONS §15 warns about: editing the amount down to ¥3,000 and losing the
+¥5,000 she actually lent.
+
+**What a fix looks like.** A repayment record with its own date, the mirror of
+`expense_refunds` for the borrow bucket: `borrow_owed` would read
+`amount − repayments`, `borrow_repaid` would count what came back, and
+`mark_paid` would stay "repaid in full". Same shape as refunds (own table,
+own history action, own undo), same read-side derivation, same guard against
+editing the gross figure below what was repaid. Until then: split the row with
+`expenses_update` + `expenses_add` if a partial repayment must be tracked.

@@ -14,7 +14,7 @@ Built to replace free-text WeChat messages — not a business system.
   accounts. Every change is recorded in an append-only history.
 - **Store** — Postgres (Neon) in production; the same portable SQL runs the
   test suite on sqlite with no database server.
-- **MCP** — streamable-HTTP server (Python `mcp` SDK) on Cloud Run: 13 tools
+- **MCP** — streamable-HTTP server (Python `mcp` SDK) on Cloud Run: 18 tools
   built for casual speech (fuzzy targeting, coached errors, bilingual
   triggers) plus 记账/对账/修复 persona prompts — design rationale in
   `docs/MCP_DESIGN.md`.
@@ -38,7 +38,7 @@ Built to replace free-text WeChat messages — not a business system.
 
 ```bash
 pip install -r requirements.txt
-python3 -m unittest discover -s tests        # 377 tests, sqlite, no DB server
+python3 -m unittest discover -s tests        # 491 tests, sqlite, no DB server
 python3 -m app.main                          # http://localhost:8080
 python3 scripts/mint_link.py --label wife --base-url http://localhost:8080
 ```
@@ -48,8 +48,9 @@ Claude/ChatGPT to the MCP: see **`docs/RUNBOOK.md`**.
 
 ## Status
 
-**v0.8.1** — deployed on Cloud Run + Neon (revision `family-expenses-00011-j96`)
-and **in daily household use since 2026-08-11**. Three-tab portal behind Auth0
-login, 10-tool MCP open and header-free. Version history in
+**v0.13.0** in the repo; **in daily household use since 2026-08-11** on Cloud
+Run + Neon (the deployed revision is recorded in `docs/FEATURE_CONTRACT.md`).
+Four-tab portal behind Auth0 login with refunds and course editing on her
+side; an 18-tool MCP, open and header-free, on the owner's. Version history in
 `docs/CHANGELOG.md`; known deferred issues in `docs/BACKLOG.md`.
 Default branch: `main`.

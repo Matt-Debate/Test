@@ -303,6 +303,44 @@ demo-backend check so it cannot come back on the next handoff.
 
 ---
 
+## 15. A workaround that rewrites history is a missing primitive
+
+**What happened.** 2026-09-05: a prepaid 1:1 badminton pack (¥3,600, ten
+classes, five attended) was half refunded, and the ¥1,800 bought a group pack
+instead. The group half took two tool calls. The 1:1 half was not expressible
+at all: there was no way to change a course's class count, no way to remove a
+course from the MCP (the delete-refusal pointed at "the Classes tab in the
+portal", a surface the agent cannot reach), no way to name the portal so a
+human could be sent there, and no refund. The assistant and the owner
+deleted the course and the payment by hand and rebuilt both: a new expense id,
+a new `created_at`, five attendance events "created" a month after the dates
+they record, an audit trail orphaned from the row that replaced it, and a
+ledger that then claimed he paid ¥1,800 on a day he paid ¥3,600 — the refund
+invisible, the amount rewritten.
+
+Three separate failures, one shape each:
+
+- **The ledger could not say what happened,** so what happened was rewritten
+  to fit the ledger. Every read consumed one `amount`, and the only way to
+  make totals right was to make the row lie.
+- **An error string pointed at a surface its reader could not reach.** P3
+  already said a cross-reference must name something callable; this was the
+  same failure pointed the other way, from the MCP at the portal.
+- **The owner's surface got the primitive first, and hers was an
+  afterthought.** She is the one the coach hands the refund to. Without a
+  portal counterpart the thing she would do is edit the amount down — the
+  exact rewrite the primitive exists to replace.
+
+**Rule.** When the only way to express a real event is delete-and-recreate,
+that is a missing primitive, not a workflow, and the fix is the primitive —
+recorded as its own dated fact, with the original row intact and every read
+deriving the effective figure so no consumer can forget it. Give the new fact
+a way back (an undo) or the next mistake is a rebuild again. Then ask, for
+every write the operator's surface gained, what the *other* user's surface
+does with the same event; if the answer is "edits a number", it needs the
+same primitive. And an error string must name something its reader can call
+from where they are standing.
+
 ## Adding to this file
 
 When a review round finds something real, add the pair: **what actually

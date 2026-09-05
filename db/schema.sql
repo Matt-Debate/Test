@@ -1,4 +1,4 @@
--- Family Expenses — schema (v0.2.0)
+-- Family Expenses — schema (v0.13.0)
 --
 -- PORTABLE DDL: runs unmodified on Postgres (Neon, production) and sqlite
 -- (tests). Rules that keep it portable:
@@ -29,6 +29,14 @@ CREATE INDEX IF NOT EXISTS idx_expenses_paid ON expenses(paid);
 CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date);
 
 -- Append-only audit: one row per mutation; never updated or deleted.
+--
+-- Since v0.13.0 the trail also carries refunds and the class tracker's own
+-- mutations, keyed by the payment that funds the course — a package is 1:1
+-- with its expense and can never be re-pointed, so the expense id is a stable
+-- home for "what happened to this course". The action list is mirrored in
+-- app/models.py HISTORY_ACTIONS; a parity test fails if the two drift, and
+-- Database._migrate_history_actions widens the CHECK on a database that
+-- predates an entry (this is the one constraint IF NOT EXISTS cannot change).
 CREATE TABLE IF NOT EXISTS expense_history (
   id          TEXT PRIMARY KEY,
   expense_id  TEXT NOT NULL,
@@ -36,7 +44,10 @@ CREATE TABLE IF NOT EXISTS expense_history (
   -- alone cannot order same-second mutations deterministically
   seq         INTEGER NOT NULL,
   action      TEXT NOT NULL CHECK (
-                action IN ('create', 'update', 'mark_paid', 'unmark_paid', 'delete')
+                action IN ('create', 'update', 'mark_paid', 'unmark_paid', 'delete',
+                           'refund', 'refund_delete',
+                           'package_create', 'package_update', 'package_delete',
+                           'class_log', 'class_unlog')
               ),
   changed_by  TEXT,
   changed_at  TEXT NOT NULL,
@@ -44,6 +55,27 @@ CREATE TABLE IF NOT EXISTS expense_history (
 );
 CREATE INDEX IF NOT EXISTS idx_expense_history_expense
   ON expense_history(expense_id, seq);
+
+-- ── refunds (v0.13.0) ────────────────────────────────────────────────────
+-- Money that came BACK on a payment. The payment row keeps its original
+-- amount — a refund is a second fact with its own date, not a correction of
+-- the first — and every read derives the effective figure as
+-- amount − SUM(refunds). Writing the payment down instead is what this table
+-- replaces: it claimed he paid ¥1,800 on a day he paid ¥3,600.
+--
+-- ON DELETE CASCADE: a refund has no life apart from its payment, and the
+-- application's delete snapshots the refunds into history before the row
+-- goes. (Contrast class_packages, whose FK is there to REFUSE the delete.)
+CREATE TABLE IF NOT EXISTS expense_refunds (
+  id          TEXT PRIMARY KEY,
+  expense_id  TEXT NOT NULL REFERENCES expenses(id) ON DELETE CASCADE,
+  amount      REAL NOT NULL CHECK (amount > 0),
+  date        TEXT NOT NULL,
+  reason      TEXT,
+  changed_by  TEXT,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_expense_refunds_expense ON expense_refunds(expense_id);
 
 -- Bookmarkable household links (pattern adapted from work-dashboards
 -- portal_tokens, minus tenancy/scoping). expires_at NULL = never expires —

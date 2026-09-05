@@ -55,7 +55,7 @@ no arrays, no PG-only expressions.
 |---|---|---|
 | `id` | TEXT PK | 12-hex app-generated |
 | `date` | TEXT NOT NULL | `YYYY-MM-DD` — the **due** date: when it must be paid |
-| `amount` | REAL NOT NULL CHECK > 0 | |
+| `amount` | REAL NOT NULL CHECK > 0 | the **gross** figure. Every read exposes the **effective** amount (gross − refunds) under the name `amount`, with `gross_amount` and `refunded` beside it, so no total or course rate can miss a refund; `update(amount=…)` and the portal edit box write the gross figure and refuse to go below what came back |
 | `currency` | TEXT NOT NULL DEFAULT 'CNY' | **CNY only, enforced** — every total adds `amount` without conversion, so one foreign row would falsify all of them |
 | `category` | TEXT | free text; canonical keys in `store.CATEGORIES`. **`borrow` is arithmetic-bearing** — money she fronted, owed back, excluded from every household total |
 | `description` | TEXT | what it was |
@@ -66,21 +66,49 @@ no arrays, no PG-only expressions.
 
 ### `expense_history` (append-only)
 `id` PK, `expense_id`, `action` CHECK in
-(`create`,`update`,`mark_paid`,`unmark_paid`,`delete`), `changed_by`,
-`changed_at`, `snapshot` TEXT (JSON; post-change state, pre-change for delete).
-Never updated or deleted by application code.
+(`create`,`update`,`mark_paid`,`unmark_paid`,`delete`,`refund`,`refund_delete`,
+`package_create`,`package_update`,`package_delete`,`class_log`,`class_unlog`),
+`changed_by`, `changed_at`, `snapshot` TEXT (JSON; post-change state,
+pre-change for the deletes). Never updated or deleted by application code.
+Since v0.13.0 the class tracker's own mutations are recorded here **under the
+payment that funds the course** (a package is 1:1 with its expense and never
+re-pointed), and a `package_delete` snapshot carries every logged class — so
+removing a course destroys nothing. The action list is mirrored in
+`app/models.py HISTORY_ACTIONS` (parity-tested); widening the CHECK on a live
+database is done by `Database._migrate_history_actions()` at startup.
+
+### `expense_refunds` (v0.13.0)
+`id` PK, `expense_id` FK → `expenses` ON DELETE CASCADE, `amount` CHECK > 0,
+`date`, `reason`, `changed_by`, `created_at`. **Money that came back on a paid
+row, as its own dated fact.** The payment keeps its amount and dates; the
+refund cannot exceed what is left; an unpaid row cannot be refunded (that is a
+price change, `update`); a `borrow` row cannot be refunded (a repayment is
+`mark_paid`; a partial one has no primitive — `docs/BACKLOG.md` §11); and a
+refunded row cannot go back to unpaid (`mark_paid(paid=False)` refuses, the
+mirror of the same rule). Amounts are rounded to cents at the write, so the
+refunds listed on a row always sum to its `refunded`. A refund reduces its
+row **in the row's own month** —
+the refund date is recorded and shown, but it does not create a credit in the
+month it arrived, because every tab buckets by row and a dated credit would be
+a negative row, which the schema forbids. Deleting the payment snapshots its
+refunds into history and cascades them away.
 
 ### `class_packages` / `class_events` (v0.10.0)
 
 A **package** is a prepaid course funded by exactly one `expenses` row
 (`expense_id` UNIQUE — two packages on one payment would each claim the whole
 amount and double-count it). It stores **no money of its own**: the per-class
-rate is `expenses.amount / class_count`, derived at read time, so correcting the
-payment corrects the tracker and the two cannot disagree. `kind` is `per_class`
+rate is `expenses.amount / class_count` — the **effective** amount, after
+refunds — derived at read time, so correcting the payment or refunding part of
+it corrects the tracker and the two cannot disagree. `kind` is `per_class`
 (a pack of N classes drawn down by attending) or `period` (a flat month/semester
 fee where the classes that did NOT happen are owed back). An expense that funds
-a package cannot be deleted until the package is — cascading would destroy an
-attendance log silently.
+a package cannot be deleted until the package is — the refusal names
+`classes_delete(package_id=…)` — and cascading is deliberately not offered.
+`class_count` can be edited (`classes_update`, the portal's course editor, or
+`expenses_refund(resize_package_to=…)` in the same transaction as the refund),
+but never below the classes already logged: attended ones for a pack, missed
+ones for a period fee. The refusal names the conflicting classes.
 
 **`class_events`** — one row per class: `attended`, `missed_school` (they
 cancelled, so it is reclaimable) or `missed_us` (we skipped, so it is
@@ -146,13 +174,20 @@ portal page and the MCP mount.
 | `/api/update` | `id, fields{date?,amount?,currency?,category?,description?,submitted_by?}, changed_by?` | update + history(`update`) |
 | `/api/mark-paid` | `id, paid, paid_date?, changed_by?` | set paid state + history(`mark_paid`/`unmark_paid`) |
 | `/api/delete` | `id, changed_by?` | delete + history(`delete`, pre-change snapshot) |
-| `/api/history` | `id` | audit trail for one expense |
-| `/api/classes-list` | `include_archived?` | packages with derived totals (ALL of them) + the untracked payments in `store.CLASS_CATEGORIES` only + `today`/`midnight_in` |
-| `/api/classes-add` | `expense_id, name, kind, class_count, period_label?` | start tracking a course |
-| `/api/classes-log` | `package_id, kind, date?, note?` | record one class (attended / missed_school / missed_us) |
-| `/api/classes-unlog` | `event_id` | take back one logged class |
-| `/api/classes-update` | `id, fields{name?,kind?,class_count?,period_label?,archived?}` | edit a package — never its money |
-| `/api/classes-delete` | `id` | remove a package and its class log |
+| `/api/history` | `id` | audit trail for one expense — since v0.13.0 also its refunds and the course it funds |
+| `/api/refund` | `id, amount, date?, reason?, resize_package_to?` | record money that came back + history(`refund`); `resize_package_to` edits the funded course's `class_count` in the same transaction (+ history(`package_update`)) |
+| `/api/refund-delete` | `refund_id` | remove one refund + history(`refund_delete`, pre-change refund in the snapshot) |
+| `/api/classes-list` | `include_archived?` | packages with derived totals (ALL of them) + the untracked payments in `store.CLASS_CATEGORIES` only + `today`/`midnight_in`. The portal asks for archived rows and partitions them into 已结课 |
+| `/api/classes-add` | `expense_id, name, kind, class_count, period_label?` | start tracking a course + history(`package_create`) |
+| `/api/classes-log` | `package_id, kind, date? \| dates?, note?` | record one class (attended / missed_school / missed_us) — or a list of dates, all or nothing — + history(`class_log`) |
+| `/api/classes-unlog` | `event_id` | take back one logged class + history(`class_unlog`); returns the package |
+| `/api/classes-update` | `id, fields{name?,kind?,class_count?,period_label?,archived?}` | edit a package — never its money — + history(`package_update`); shrinking below the logged classes is refused |
+| `/api/classes-delete` | `id` | remove a package and its class log + history(`package_delete`, every event in the snapshot) |
+
+Every `/api/list` row also carries `package` (the course it funds: id, name,
+kind, class_count, archived, attended, missed — or null) and `refunds` (each
+with its id), which is what the refund box, its live preview and the row's
+原价/退款 line render from.
 
 **Validation (server-authoritative):** `amount > 0`; `date`/`paid_date` are
 `YYYY-MM-DD`; `paid=true ⇒ paid_date`; unknown update fields rejected.
@@ -162,14 +197,17 @@ commit-on-success / rollback-on-error.
 
 ## 7. MCP surface (operator)
 
-Tools (13) on the Cloud Run streamable-HTTP MCP: `expenses_help`,
+Tools (18) on the Cloud Run streamable-HTTP MCP: `expenses_help`,
 `expenses_list`, `expenses_add`, `expenses_update`, `expenses_mark_paid`,
-`expenses_delete`, `expenses_history`, `expenses_mint_link`,
-`expenses_revoke_link`, `expenses_list_links`, `classes_list`, `classes_add`,
-`classes_log` — inventory rationale in
+`expenses_delete`, `expenses_refund`, `expenses_refund_delete`,
+`expenses_history`, `expenses_mint_link`, `expenses_revoke_link`,
+`expenses_list_links`, `classes_list`, `classes_add`, `classes_update`,
+`classes_delete`, `classes_log`, `classes_log_delete` — inventory rationale in
 `docs/MCP_DESIGN.md` (`expenses_summary` folded into `list`). Plus three persona prompts
 (记账/对账/修复). Same store as the portal, so history/atomicity rules apply
-identically.
+identically. `expenses_mint_link` returns the full portal URL from
+`PORTAL_BASE_URL`; `expenses_list_links` and `expenses_help` name the host and
+never a token.
 
 **Natural-speech design (primary requirement):** mutating tools accept a
 fuzzy `query` instead of an id (one match acts; several return candidates;
@@ -198,7 +236,14 @@ The nav order is Due · Classes · History · Stats.
   description,
   due date and amount **the server stored**, read from the response.
   `DueTabVisibilityTests` sweeps today−60 … today+400 and fails if any unpaid
-  row reaches no section.
+  row reaches no section. **Since v0.13.0 a paid row offers 退款:** an inline
+  box for amount, date and reason — and, when the payment funds a per-class
+  course, 课时改为 so the pack resizes in the same call. The row then shows
+  the effective amount with 原价 and 退款 beneath it, lists each refund with
+  an × that asks before undoing, and the edit box prefills the **original**
+  amount under a label that says so (`RefundRowRenderingTests`,
+  `RefundHandlerTests`). She is the one the coach refunds, and the alternative
+  she would reach for is writing the amount down.
 - **History** — a statement: one row per month (txns · paid · outstanding), most
   recent first, tap to expand into that month's items. Scheduled future months
   sit in their own group below, and since v0.12.0 carry the same `aria-expanded`
@@ -221,7 +266,13 @@ The nav order is Due · Classes · History · Stats.
   money rule, since the store and MCP still link a package to any expense; a
   per-class pack is not asked for a period label; logging a class uses a date
   picker starting at the household's today, not a typed prompt; and removing a
-  class record asks first, naming the record.
+  class record asks first, naming the record. Since v0.13.0 each open course
+  has a second button row — 编辑 (name, class count, period label; never the
+  money), 结课 (asks first) and 删除 — and finished courses move to a collapsed
+  已结课 group at the foot of the tab rather than disappearing: the tab now
+  fetches archived rows and partitions **one** list, and
+  `ClassArchivePartitionTests` asserts every course reaches the markup exactly
+  once, in the section it belongs to.
 - **Stats** — figures and hand-rolled inline SVG charts (no chart library: no
   build step and no CDN is what makes this load behind the GFW).
 

@@ -19,7 +19,7 @@ edit lands where it has effect.
 
 **Rule: if a behavior matters, it must be encoded in the top four rows.**
 
-## Tool inventory (13) and why
+## Tool inventory (18) and why
 
 | tool | why it exists / selection cue |
 |---|---|
@@ -34,7 +34,12 @@ edit lands where it has effect.
 | `expenses_list_links` | added v0.5.0 after live testing: revoke was **unreachable in practice** — the agent had no way to discover what to revoke, and `expenses_revoke_link` pointed it at the operator CLI, a channel an agent cannot use. Returns ids + usage, never token values, so revocation works without permanent secrets entering the chat. A cross-reference is only guidance if it names a tool the agent can actually call |
 | `classes_list` | added v0.10.0 with the class tracker: "还剩几节课" is a different question from "what do I owe", and answering it from `expenses_list` would mean the agent doing the arithmetic itself — which is where wrong money comes from |
 | `classes_add` | starts tracking a course FROM a payment already in the ledger. Deliberately cannot invent the expense: the money belongs to the ledger, and a package that carried its own amount would be a second place for the price to be wrong |
-| `classes_log` | "今天上了/取消了/没去" — the high-frequency class write. Takes fuzzy `query` on the course name like every other mutating tool, and validates the event kind BEFORE resolving the course so a bad kind does not cost a round trip |
+| `classes_log` | "今天上了/取消了/没去" — the high-frequency class write. Takes fuzzy `query` on the course name like every other mutating tool, and validates the event kind BEFORE resolving the course so a bad kind does not cost a round trip. Since v0.13.0 also `dates=[…]`: restoring a term was five round trips, and a batch that half-applies is a state nobody can reason about, so it is one transaction |
+| `expenses_refund` | added v0.13.0 after a day when a half-refunded ¥3,600 course could only be expressed by deleting the payment and the course and rebuilding both — a new id, a new `created_at`, five attendance events "created" a month after their dates, and a ledger claiming he paid ¥1,800 on a day he paid ¥3,600. Records the refund as its own dated row; every read derives the effective amount. `resize_package_to` changes the course's class count in the SAME transaction, because a refund on a course nearly always means fewer classes and the two halves applied separately reprice a ¥360 class at ¥180 |
+| `expenses_refund_delete` | the undo. Without it a mistaken refund would be fixed by deleting the whole payment, which is the rebuild the refund tool exists to prevent |
+| `classes_update` | "课时改成5 / archive it / rename it". The core miss of that day: `class_count` divides the money and had no in-place path. Refuses to shrink below the classes already logged and NAMES them, rather than silently zeroing what remains |
+| `classes_delete` | so a course can be removed without the portal — the old delete-refusal pointed the agent at "the Classes tab", a surface it cannot reach (the same failure as `expenses_revoke_link` pointing at the CLI, one release later). The class log survives in the payment's history, which is what makes this safe to offer |
+| `classes_log_delete` | one mislogged class had no undo except deleting the course. Event ids come from `classes_log`'s result and `classes_list(verbose=true)` — the default list is light because the full event array made `classes_list` the heaviest call on the server |
 
 Principles: no two tools answer the same user intent; every mutating tool
 takes `query` (fuzzy, candidates-on-ambiguity, never guesses); every write

@@ -62,10 +62,17 @@ to renew, ever.
   with URL `https://<service-url>/mcp`. Do not add an authorization header.
 - **ChatGPT (developer mode):** same URL, no authorization header.
 
-Tools: `expenses_help`, `expenses_list`, `expenses_add`, `expenses_update`,
-`expenses_mark_paid`, `expenses_delete`, `expenses_history`,
-`expenses_mint_link`, `expenses_revoke_link`, `expenses_list_links`
+Tools (18): `expenses_help`, `expenses_list`, `expenses_add`, `expenses_update`,
+`expenses_mark_paid`, `expenses_delete`, `expenses_refund`,
+`expenses_refund_delete`, `expenses_history`, `expenses_mint_link`,
+`expenses_revoke_link`, `expenses_list_links`, `classes_list`, `classes_add`,
+`classes_update`, `classes_delete`, `classes_log`, `classes_log_delete`
 (design: `docs/MCP_DESIGN.md`).
+
+`expenses_mint_link` returns the full `https://<service-url>/t/<token>` link
+because the service knows its own host from `PORTAL_BASE_URL` (§8) — the same
+value the Auth0 redirect uses, set by `scripts/deploy.sh`. If it is unset the
+tool says so instead of printing a placeholder that looks like a URL.
 
 **Personas** (appear as prompt templates in Claude apps; optional):
 记账 `jizhang` = dictate expenses; 对账 `duizhang` = walk the unpaid list and
@@ -86,7 +93,10 @@ these work as single utterances, Chinese or English:
 | 钢琴课改成350 / change piano to 350 | edits the amount |
 | 删掉游泳课 / delete swim class | deletes (client confirms first; audit row kept) |
 | 这个月花了多少？/ totals? | summary |
-| 给我老婆做个链接 / make a link for my wife | mints a never-expiring portal link |
+| 退了1800 / they refunded us 1800 | records a refund against the paid row — the row keeps its ¥3,600; totals read ¥1,800; a course on it can be resized in the same call |
+| 课时改成5 / the pack is 5 classes now | edits the course, never its money; refuses to shrink below the classes already logged |
+| 这个课结束了 / archive the course | retires it (kept, hidden from lists) |
+| 给我老婆做个链接 / make a link for my wife | mints a never-expiring portal link and returns the full URL |
 
 If a phrase matches several expenses, the tool returns the candidates and the
 assistant asks which one — nothing is guessed silently.
@@ -109,15 +119,36 @@ assistant asks which one — nothing is guessed silently.
   locally, but Google's front end reserves some paths ending in `z`.
 - **Scale:** min-instances=0 is fine (stateless HTTP MCP; Neon serverless).
   Cold starts of a couple seconds are acceptable for this use.
-- **Schema changes:** v1 applies `db/schema.sql` idempotently at startup.
-  The first breaking change must introduce a dated migration file — see
-  `docs/IMPLEMENTATION_PLAN.md`.
+- **Schema changes:** `db/schema.sql` applies idempotently at startup, and
+  additive changes go there. **One in-place change exists** (v0.13.0): the
+  CHECK on `expense_history.action` had to be widened for refund and
+  class-tracker actions, which `CREATE TABLE IF NOT EXISTS` cannot do.
+  `Database._migrate_history_actions()` does it at startup, driven by
+  inspecting the live constraint (so it runs once and is a no-op after),
+  best-effort like the hardening file. If it cannot apply, the startup log
+  carries one line starting `WARNING: expense_history action migration did
+  not apply`, and the store **refuses every write that needs a new action**
+  — refunds, course edits, **and her class logging** (which worked before
+  v0.13.0) — with a message that opens in her language and names this section
+  after it, rather than half-writing. `scripts/smoke_live.py` gates on it by
+  name. To check by hand against production (secret piped, never printed —
+  P9):
+  ```bash
+  DATABASE_URL="$(gcloud secrets versions access latest --secret=family-expenses-database-url --project=work-dashboards)" \
+    python3 -c "from app.db import Database; print(Database().history_actions_missing())"
+  ```
+  `[]` means every action is allowed. A non-empty list means the ALTER has to
+  be run by hand (`ALTER TABLE expense_history DROP CONSTRAINT
+  expense_history_action_check; ALTER TABLE expense_history ADD CONSTRAINT
+  expense_history_action_check CHECK (action IN (…))` with the list from
+  `app/models.py HISTORY_ACTIONS`), then restart. Anything beyond that
+  should introduce dated migration files.
 
 ## 7. Local development
 
 ```bash
 pip install -r requirements.txt
-python3 -m unittest discover -s tests        # 377 tests, sqlite, no server
+python3 -m unittest discover -s tests        # 491 tests, sqlite, no server
 python3 scripts/mint_link.py --label dev     # local sqlite file
 python3 -m app.main                          # http://localhost:8080
 ```

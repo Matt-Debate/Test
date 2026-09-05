@@ -377,9 +377,19 @@ class DocumentedCountsTests(unittest.TestCase):
             name for name in _re.findall(r"^    def (\w+)\(", source, _re.M)
             if name.startswith(("expenses_", "classes_"))
         })
+        # Every way the docs write the number: "18 tools", "18-tool",
+        # "Tools (18)", "inventory (18)". The first regex matched only the
+        # first form, so three of the five docs named here yielded NO claim
+        # and passed vacuously — through the release that changed all three
+        # (v0.13.0's third review mutated them to 7 and the test stayed green).
+        pattern = _re.compile(
+            r"(\d+)[ -]tools?\b|\bTools? \((\d+)\)|\binventory \((\d+)\)", _re.I
+        )
         for name in self.LIVING + ("docs/FEATURE_CONTRACT.md", "docs/MCP_DESIGN.md"):
             body = (self.ROOT / name).read_text(encoding="utf-8")
-            for claim in _re.findall(r"(\d+) tools", body):
+            claims = [next(g for g in m.groups() if g) for m in pattern.finditer(body)]
+            self.assertTrue(claims, f"{name} states no tool count — the guard is blind to it")
+            for claim in claims:
                 with self.subTest(doc=name, claim=claim):
                     self.assertEqual(int(claim), actual,
                                      f"{name} advertises {claim} tools, {actual} exist")
@@ -1043,7 +1053,7 @@ class ClassRowRenderingTests(unittest.TestCase):
 var packages = [{json.dumps(package)}];
 var candidates = [{{"id":"x1","description":"足球课","amount":2200,"date":"2026-08-03","category":"aden-sports"}}];
 var openPkgs = {json.dumps({i: True for i in open_ids})};
-var clsDates = {{}}, clsBusy = {{}};
+var clsDates = {{}}, clsBusy = {{}}, clsEdit = {{}};
 function todayStr() {{ return "2026-08-11"; }}
 var lang = "zh";
 var STR = {{zh: {{ev: {{attended:"上了", missed_school:"停课", missed_us:"没去"}}}}}};
@@ -1052,7 +1062,8 @@ function $(id) {{ return {{ innerHTML: "", set: null, value: "",
   get selectedOptions() {{ return []; }},
   textContent: "" }}; }}
 var nodes = {{}};
-$ = function (id) {{ if (!nodes[id]) nodes[id] = {{innerHTML:"", value:"", textContent:""}};
+$ = function (id) {{ if (!nodes[id]) nodes[id] = {{innerHTML:"", value:"", textContent:"",
+  querySelector: function () {{ return null; }}}};
   return nodes[id]; }};
 {seed}
 function esc(s) {{ return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {{
@@ -1403,6 +1414,8 @@ var openPkgs = {}, logged = [], rendered = 0, apiCalls = [];
 // the handler reads, so a driver states the date by setting dateEl.value
 var clsDates = {};
 var clsBusy = {};
+var clsEdit = {};
+var packages = [{id: "p1", kind: "per_class"}];
 var timers = [];
 function setTimeout(fn, ms) { timers.push({fn: fn, ms: ms}); return timers.length; }
 function fireTimers() { var ts = timers; timers = []; ts.forEach(function (x) { x.fn(); }); }
@@ -2909,6 +2922,1072 @@ console.log(JSON.stringify(byMonth));
         for spending in ("待付 · 未来30天", "待付 · 30天以后", "本月已付"):
             self.assertEqual(got.get(spending, []), [],
                              f"a borrow row reached {spending}")
+
+
+class RefundApiTests(unittest.TestCase):
+    """Refunds and course edits over the real HTTP path — her side of what
+    the MCP got in v0.13.0. Authorship is the link's label on every one of
+    these, the same as every other portal write."""
+
+    def setUp(self):
+        self.client, self.store, self.token = make_client()
+        self.label = self.store.list_tokens()[0]["label"]
+
+    def post(self, _endpoint, **body):
+        body["token"] = self.token
+        return self.client.post(f"/api/{_endpoint}", json=body)
+
+    def paid(self, amount=3600, description="Badminton (8月-9月)"):
+        e = self.post("submit", date="2026-08-15", amount=amount,
+                      description=description, category="aden-sports").json()["expense"]
+        self.post("mark-paid", id=e["id"], paid=True, paid_date="2026-08-15")
+        return e["id"]
+
+    def test_a_refund_with_a_resize_round_trips(self):
+        eid = self.paid()
+        pid = self.post("classes-add", expense_id=eid, name="羽毛球 (1:1)",
+                        kind="per_class", class_count=10).json()["package"]["id"]
+        for day in ("2026-08-17", "2026-08-21", "2026-08-28", "2026-08-31", "2026-09-02"):
+            self.post("classes-log", package_id=pid, kind="attended", date=day)
+        r = self.post("refund", id=eid, amount=1800, date="2026-09-05",
+                      reason="half back", resize_package_to=5, changed_by="Mallory")
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual((body["expense"]["amount"], body["expense"]["gross_amount"]),
+                         (1800.0, 3600.0))
+        self.assertEqual(body["refund"]["reason"], "half back")
+        self.assertEqual(body["package"]["summary"]["class_count"], 5)
+        self.assertEqual(body["package"]["summary"]["rate"], 360.0)
+        listed = self.post("list").json()
+        row = [e for e in listed["expenses"] if e["id"] == eid][0]
+        self.assertEqual(row["amount"], 1800.0)
+        self.assertEqual(row["refunded"], 1800.0)
+        self.assertEqual([x["id"] for x in row["refunds"]], [body["refund"]["id"]])
+        self.assertEqual(row["package"]["name"], "羽毛球 (1:1)")
+        self.assertEqual(row["package"]["class_count"], 5)
+        self.assertEqual(listed["summary"]["paid"], 1800.0)
+        hist = self.post("history", id=eid).json()["history"]
+        self.assertEqual(hist[-1]["action"], "refund")
+        # the author is the LINK, not what the body claimed
+        self.assertEqual(hist[-1]["changed_by"], self.label)
+        self.assertEqual(hist[-2]["action"], "package_update")
+        self.assertEqual(hist[-2]["changed_by"], self.label)
+
+    def test_a_blank_resize_records_the_refund_alone_but_still_returns_the_course(self):
+        eid = self.paid()
+        self.post("classes-add", expense_id=eid, name="c", kind="per_class", class_count=10)
+        r = self.post("refund", id=eid, amount=100, resize_package_to="")
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertFalse(body["resized"])
+        # the course comes back untouched, so the confirmation can quote the
+        # rate the refund left it with
+        self.assertEqual(body["package"]["summary"]["class_count"], 10)
+        self.assertEqual(body["package"]["summary"]["rate"], 350.0)
+        actions = [h["action"] for h in self.post("history", id=eid).json()["history"]]
+        self.assertNotIn("package_update", actions)
+        # and a row that funds no course returns none
+        r = self.post("refund", id=self.paid(description="plain"), amount=1)
+        self.assertIsNone(r.json()["package"])
+
+    def test_unpaying_a_refunded_row_is_a_400(self):
+        eid = self.paid()
+        self.post("refund", id=eid, amount=1800)
+        r = self.post("mark-paid", id=eid, paid=False)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("refund", r.json()["error"])
+        self.assertEqual(self.post("list").json()["summary"]["unpaid"], 0.0)
+
+    def test_a_refused_refund_is_a_400_that_coaches(self):
+        e = self.post("submit", date="2026-08-15", amount=100,
+                      description="unpaid").json()["expense"]
+        r = self.post("refund", id=e["id"], amount=50)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("not marked paid", r.json()["error"])
+        eid = self.paid()
+        self.assertEqual(self.post("refund", id=eid, amount=3601).status_code, 400)
+        self.assertEqual(self.post("refund", id="nope", amount=1).status_code, 404)
+
+    def test_a_refund_can_be_deleted_and_an_unknown_one_is_a_404(self):
+        eid = self.paid()
+        rid = self.post("refund", id=eid, amount=100).json()["refund"]["id"]
+        r = self.post("refund-delete", refund_id=rid)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["expense"]["amount"], 3600.0)
+        self.assertEqual(self.post("refund-delete", refund_id=rid).status_code, 404)
+        hist = self.post("history", id=eid).json()["history"]
+        self.assertEqual(hist[-1]["action"], "refund_delete")
+        self.assertEqual(hist[-1]["changed_by"], self.label)
+
+    def test_the_list_says_which_course_a_payment_funds(self):
+        eid = self.paid()
+        other = self.paid(description="court fee")
+        self.post("classes-add", expense_id=eid, name="羽毛球", kind="period", class_count=8)
+        rows = {e["id"]: e for e in self.post("list").json()["expenses"]}
+        self.assertEqual(rows[eid]["package"]["kind"], "period")
+        self.assertIsNone(rows[other]["package"])
+        self.assertEqual(rows[other]["refunds"], [])
+
+    def test_the_amount_edit_is_the_original_figure_and_is_guarded(self):
+        eid = self.paid()
+        self.post("refund", id=eid, amount=1800)
+        r = self.post("update", id=eid, fields={"amount": 1000})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("BEFORE refunds", r.json()["error"])
+        r = self.post("update", id=eid, fields={"amount": 3500})
+        self.assertEqual(r.json()["expense"]["amount"], 1700.0)
+
+    def test_a_batch_of_dates_reaches_the_store_over_http(self):
+        """The handler forwarded only `date`, so a body carrying `dates`
+        logged ONE class for today (cross-model review)."""
+        eid = self.paid()
+        pid = self.post("classes-add", expense_id=eid, name="c", kind="per_class",
+                        class_count=10).json()["package"]["id"]
+        r = self.post("classes-log", package_id=pid, kind="attended",
+                      dates=["2026-08-17", "2026-08-21", "2026-08-28"])
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(sorted(e["date"] for e in r.json()["package"]["events"]),
+                         ["2026-08-17", "2026-08-21", "2026-08-28"])
+        self.assertEqual(r.json()["package"]["summary"]["remaining"], 7)
+        self.assertEqual(self.post("classes-log", package_id=pid, kind="attended",
+                                   dates=[]).status_code, 400)
+        self.assertEqual(self.post("classes-log", package_id=pid, kind="attended",
+                                   date="2026-09-01", dates=["2026-09-02"]).status_code, 400)
+
+    def test_archived_over_the_raw_api_takes_only_a_boolean(self):
+        """`bool("false")` is True: a raw body meaning "restore" archived the
+        course (cross-model review). The portal sends a real boolean."""
+        eid = self.paid()
+        pid = self.post("classes-add", expense_id=eid, name="c", kind="per_class",
+                        class_count=10).json()["package"]["id"]
+        self.assertTrue(self.post("classes-update", id=pid, fields={"archived": True})
+                        .json()["package"]["archived"])
+        self.assertFalse(self.post("classes-update", id=pid, fields={"archived": "false"})
+                         .json()["package"]["archived"])
+        self.assertTrue(self.post("classes-update", id=pid, fields={"archived": "true"})
+                        .json()["package"]["archived"])
+        r = self.post("classes-update", id=pid, fields={"archived": "maybe"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("true or false", r.json()["error"])
+
+    def test_course_edits_from_the_portal_carry_the_link_as_author(self):
+        eid = self.paid()
+        pid = self.post("classes-add", expense_id=eid, name="c", kind="per_class",
+                        class_count=10).json()["package"]["id"]
+        r = self.post("classes-update", id=pid, fields={"archived": True, "name": "d"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["package"]["archived"])
+        ev = self.post("classes-log", package_id=pid, kind="attended",
+                       date="2026-08-20").json()["package"]["events"][0]
+        r = self.post("classes-unlog", event_id=ev["id"])
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["package"]["summary"]["remaining"], 10)
+        self.assertEqual(self.post("classes-delete", id=pid).status_code, 200)
+        hist = self.post("history", id=eid).json()["history"]
+        self.assertEqual([h["action"] for h in hist][-4:],
+                         ["package_update", "class_log", "class_unlog", "package_delete"])
+        self.assertEqual({h["changed_by"] for h in hist[-4:]}, {self.label})
+        # the shrink rule reaches her as a 400 she can read, not a 500
+        pid = self.post("classes-add", expense_id=self.paid(description="x"), name="c",
+                        kind="per_class", class_count=3).json()["package"]["id"]
+        for day in ("2026-08-01", "2026-08-02", "2026-08-03"):
+            self.post("classes-log", package_id=pid, kind="attended", date=day)
+        r = self.post("classes-update", id=pid, fields={"class_count": 2})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("2026-08-03", r.json()["error"])
+
+
+@unittest.skipUnless(shutil.which("node"), "node not available to run the portal's JS")
+class RefundRowRenderingTests(unittest.TestCase):
+    """Runs the real itemHtml / editBoxHtml / refundBoxHtml / histLineHtml.
+
+    The one that matters most is the edit prefill: the amount field
+    round-trips into a write, and prefilling the EFFECTIVE figure on a
+    refunded row would let a tap on Save turn ¥3,600 paid into ¥1,800 paid
+    and ¥0 effective — the exact rewrite the refund exists to replace.
+    """
+
+    PORTAL = Path(__file__).resolve().parent.parent / "app" / "portal.html"
+    TODAY = "2026-09-05"
+    PAID = {"id": "r1", "date": "2026-08-15", "amount": 1800.0, "gross_amount": 3600.0,
+            "refunded": 1800.0, "category": "aden-sports",
+            "description": "Badminton (8月-9月)", "paid": True, "paid_date": "2026-08-15",
+            "refunds": [{"id": "f1", "amount": 1800.0, "date": "2026-09-05",
+                         "reason": "half back", "changed_by": "wife"}],
+            "package": {"id": "p1", "name": "羽毛球 (1:1)", "kind": "per_class",
+                        "class_count": 10, "archived": False, "attended": 5, "missed": 0}}
+
+    def run_js(self, tail: str, rows: list, open_ids=(), lang: str = "zh") -> dict:
+        import json
+
+        src = self.PORTAL.read_text(encoding="utf-8")
+        block = src[src.index("  var CATS = ["):src.index("  // ---- tab 3: stats ----")]
+        for marker in ("function itemHtml", "function refundBoxHtml", "function editBoxHtml",
+                       "function histLineHtml", "function refundBody", "function refundHintText"):
+            self.assertIn(marker, block, "block markers moved")
+        script = f"""
+var _nodes = {{}}, localStorage = {{getItem: function () {{ return {json.dumps(lang)}; }}}};
+var document = {{
+  getElementById: function (id) {{
+    if (!_nodes[id]) _nodes[id] = {{innerHTML: "", addEventListener: function () {{}}}};
+    return _nodes[id];
+  }},
+  addEventListener: function () {{}},
+}};
+{block}
+expenses = {json.dumps(rows)};
+{"".join(f'openItems[{json.dumps(i)}] = true;' for i in open_ids)}
+serverToday = {json.dumps(self.TODAY)};
+serverTodayAt = Date.now();
+serverMidnightIn = 43200;
+console.log(JSON.stringify({tail}));
+"""
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True,
+                             timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def item(self, row, open=True):
+        return self.run_js("itemHtml(expenses[0])", [row], [row["id"]] if open else [])
+
+    def test_a_refunded_row_shows_what_it_costs_and_what_came_back(self):
+        html = self.item(self.PAID)
+        self.assertIn('<div class="ex-amt">¥1,800.00</div>', html)
+        self.assertIn("原价 ¥3,600.00", html)
+        self.assertIn("退款 ¥1,800.00", html)
+        self.assertIn("课程 羽毛球 (1:1)", html)
+        plain = self.item(dict(self.PAID, refunded=0, gross_amount=1800.0, refunds=[],
+                               package=None))
+        self.assertNotIn('class="rf"', plain)
+        self.assertNotIn("课程", plain)
+
+    def test_the_refund_button_is_offered_only_where_money_could_come_back(self):
+        self.assertIn('data-act="refund"', self.item(self.PAID))
+        unpaid = dict(self.PAID, paid=False, paid_date=None)
+        self.assertNotIn('data-act="refund"', self.item(unpaid))
+        loan = dict(self.PAID, category="borrow")
+        self.assertNotIn('data-act="refund"', self.item(loan))
+        self.assertNotIn('data-act="refund"', self.item(self.PAID, open=False))
+
+    def test_a_refunded_row_offers_no_unpay_button(self):
+        """取消已付 on a refunded row put the NET figure on the 待付 card; the
+        server refuses it now and the button goes, the refunds' × being the
+        way back. An unrefunded paid row keeps it; an unpaid row keeps 标记已付."""
+        self.assertNotIn('data-act="pay"', self.item(self.PAID))
+        plain = dict(self.PAID, refunded=0, gross_amount=1800.0, refunds=[])
+        self.assertIn('data-act="pay">取消已付<', self.item(plain))
+        unpaid = dict(plain, paid=False, paid_date=None)
+        self.assertIn('data-act="pay">✓ 标记已付<', self.item(unpaid))
+
+    def test_the_english_half_of_the_new_strings_renders(self):
+        """Every harness pins lang='zh'; the en keys were unexecuted."""
+        html = self.run_js("itemHtml(expenses[0])", [self.PAID], [self.PAID["id"]], lang="en")
+        self.assertIn("originally ¥3,600.00 · refunded ¥1,800.00", html)
+        self.assertIn("Course 羽毛球 (1:1)", html)
+        self.assertIn('data-act="refund">Refund<', html)
+        self.assertIn("refunded ¥1,800.00 · 2026-09-05 · half back", html)
+        line = self.run_js(
+            'histLineHtml({changed_at: "t", action: "refund", changed_by: null, '
+            'snapshot: {amount: 1800, refund: {amount: 1800, date: "2026-09-05"}}})',
+            [self.PAID], lang="en")
+        self.assertIn("refund · ¥1,800.00 · 2026-09-05 · now ¥1,800.00", line)
+        box = self.run_js("refundBoxHtml(expenses[0])", [self.PAID], lang="en")
+        self.assertIn("Classes now · 羽毛球 (1:1) · currently 10classes", box)
+        self.assertIn("after refund each ¥180.00 · left 5classes (¥900.00)", box)
+
+    def hint(self, row, amount, count):
+        import json
+        return self.run_js(f"refundHintText(expenses[0], {json.dumps(amount)}, {json.dumps(count)})",
+                           [row])
+
+    def test_the_refund_preview_says_what_the_course_will_read_afterwards(self):
+        """Her zero-effort path (amount, save) leaves the count alone. That is
+        a real choice; it must never be a silent one (semantic review)."""
+        fresh = dict(self.PAID, refunded=0, gross_amount=3600.0, refunds=[])
+        # leave the count: the silent reprice, said out loud
+        self.assertEqual(self.hint(fresh, 1800, 0), "退款后 每节 ¥180.00 · 剩 5节 (¥900.00)")
+        # resize to what was attended: the honest state
+        self.assertEqual(self.hint(fresh, 1800, 5), "退款后 每节 ¥360.00 · 剩 0节")
+        # nothing typed yet: the course as it stands
+        self.assertEqual(self.hint(fresh, 0, 0), "退款后 每节 ¥360.00 · 剩 5节 (¥1,800.00)")
+        # a second refund starts from what is already refunded
+        self.assertEqual(self.hint(self.PAID, 900, 0), "退款后 每节 ¥90.00 · 剩 5节 (¥450.00)")
+        # more than is left cannot go negative here (the server refuses it anyway)
+        self.assertEqual(self.hint(fresh, 9999, 0), "退款后 每节 ¥0.00 · 剩 5节 (¥0.00)")
+        # a count below the classes attended is refused by the server, refund
+        # and all — the preview must not show a plausible "剩 0节" for it
+        self.assertEqual(self.hint(fresh, 1800, 3), "课时数不能少于已上的 5 节")
+        self.assertIn('class="r-count" data-current="10"',
+                      self.run_js("refundBoxHtml(expenses[0])", [self.PAID]))
+        self.assertIn('min="5" step="1" class="r-count"',
+                      self.run_js("refundBoxHtml(expenses[0])", [self.PAID]))
+        # what is left is derived by subtraction from a part rounded on its
+        # EXACT value, as the server does it. ¥3,599.99 for ten, five attended:
+        # the ratio is 1799.99499…, so used is ¥1,799.99 and ¥1,800.00 is left.
+        # Math.round(x * 100) saw 179999.5 and read it a cent the other way —
+        # the third review found 25 such figures in a sweep of 2,162.
+        odd = dict(fresh, gross_amount=3599.99, amount=3599.99)
+        from app.store import Store
+        server = Store.summarize_package(
+            {"class_count": 10, "kind": "per_class"}, 3599.99,
+            [{"kind": "attended"}] * 5)
+        self.assertEqual((server["used_amount"], server["remaining_amount"]),
+                         (1799.99, 1800.0), "the server's own figures moved")
+        self.assertEqual(self.hint(odd, 0, 0), "退款后 每节 ¥360.00 · 剩 5节 (¥1,800.00)")
+        # and a sweep, against the server, over figures that do not divide
+        import itertools
+        for net, count, attended in itertools.product(
+                (3599.99, 1000.124, 777.77, 2333.32), (3, 7, 10), (1, 2)):
+            s = Store.summarize_package({"class_count": count, "kind": "per_class"},
+                                        net, [{"kind": "attended"}] * attended)
+            row = dict(fresh, gross_amount=net, amount=net,
+                       package=dict(fresh["package"], class_count=count, attended=attended))
+            with self.subTest(net=net, count=count, attended=attended):
+                self.assertIn(f"({self.run_js('money(' + repr(s['remaining_amount']) + ')', [row])})",
+                              self.hint(row, 0, 0))
+        # a term fee or no course: no per-class preview
+        period = dict(fresh, package=dict(fresh["package"], kind="period"))
+        self.assertEqual(self.hint(period, 100, 0), "")
+        self.assertEqual(self.hint(dict(fresh, package=None), 100, 0), "")
+        # and the box carries it from the first paint, plus the term-fee hint
+        self.assertIn('class="hist r-hint">退款后 每节 ¥180.00 · 剩 5节 (¥900.00)<',
+                      self.run_js("refundBoxHtml(expenses[0])", [self.PAID]))
+        pbox = self.run_js("refundBoxHtml(expenses[0])", [period])
+        self.assertIn("按月／学期的课", pbox)
+        self.assertNotIn("退款后", pbox)
+        self.assertNotIn("r-hint", self.run_js("refundBoxHtml(expenses[0])",
+                                               [dict(fresh, package=None)]))
+
+    def test_recorded_refunds_are_listed_with_an_undo_that_names_them(self):
+        html = self.item(self.PAID)
+        self.assertIn('data-unrefund="f1"', html)
+        self.assertIn('data-when="2026-09-05 · ¥1,800.00"', html)
+        self.assertIn("half back", html)
+        self.assertNotIn("data-unrefund", self.item(self.PAID, open=False))
+        self.assertNotIn("data-unrefund", self.item(dict(self.PAID, refunds=[])))
+
+    def test_the_edit_box_prefills_the_original_amount_and_says_so(self):
+        html = self.run_js("editBoxHtml(expenses[0])", [self.PAID])
+        self.assertIn('class="e-amt" value="3600"', html)
+        self.assertIn("金额 (¥，退款前)", html)
+        plain = self.run_js("editBoxHtml(expenses[0])",
+                            [dict(self.PAID, refunded=0, gross_amount=1800.0)])
+        self.assertIn('class="e-amt" value="1800"', plain)
+        self.assertIn(">金额 (¥)<", plain)
+        # a payload from before v0.13.0 has no gross_amount; `amount` was gross then
+        old = {k: v for k, v in self.PAID.items() if k not in ("gross_amount", "refunded", "refunds")}
+        self.assertIn('class="e-amt" value="1800"', self.run_js("editBoxHtml(expenses[0])", [old]))
+
+    def test_the_refund_box_offers_a_resize_only_for_a_per_class_course(self):
+        html = self.run_js("refundBoxHtml(expenses[0])", [self.PAID])
+        self.assertIn('class="r-count" data-current="10" value="10"', html)
+        self.assertIn("羽毛球 (1:1)", html)
+        self.assertIn('class="r-date" value="2026-09-05"', html)
+        self.assertIn("原价 ¥3,600.00", html)
+        period = dict(self.PAID, package=dict(self.PAID["package"], kind="period"))
+        self.assertNotIn("r-count", self.run_js("refundBoxHtml(expenses[0])", [period]))
+        self.assertNotIn("r-count", self.run_js("refundBoxHtml(expenses[0])",
+                                                [dict(self.PAID, package=None)]))
+
+    def refund_body(self, fields: dict) -> dict:
+        import json
+        tail = f"""refundBody("r1", {{querySelector: function (sel) {{
+          var f = {json.dumps(fields)};
+          var key = sel.slice(1);
+          if (!(key in f)) return null;
+          return {{value: f[key], getAttribute: function (a) {{ return a === "data-current" ? "10" : null; }}}};
+        }}}})"""
+        return self.run_js(tail, [self.PAID])
+
+    def test_the_refund_body_sends_the_count_only_when_she_changed_it(self):
+        same = self.refund_body({"r-amt": "1800", "r-date": "2026-09-05", "r-reason": "  x ",
+                                 "r-count": "10"})
+        self.assertEqual(same, {"id": "r1", "amount": 1800.0, "date": "2026-09-05",
+                                "reason": "x"})
+        changed = self.refund_body({"r-amt": "1800.50", "r-date": "", "r-reason": "",
+                                    "r-count": "5"})
+        self.assertEqual(changed["resize_package_to"], 5)
+        self.assertEqual(changed["amount"], 1800.5)
+        self.assertEqual(changed["date"], self.TODAY)     # a cleared date is today
+        self.assertIsNone(changed["reason"])
+        blank = self.refund_body({"r-amt": "1", "r-date": "2026-09-05", "r-reason": "",
+                                  "r-count": ""})
+        self.assertNotIn("resize_package_to", blank)
+        no_course = self.refund_body({"r-amt": "1", "r-date": "2026-09-05", "r-reason": ""})
+        self.assertNotIn("resize_package_to", no_course)
+
+    def hist(self, entry: dict) -> str:
+        import json
+        return self.run_js(f"histLineHtml({json.dumps(entry)})", [self.PAID])
+
+    def test_history_lines_speak_each_actions_language(self):
+        refund = self.hist({"changed_at": "2026-09-05T04:00:00", "action": "refund",
+                            "changed_by": "Matt",
+                            "snapshot": {"amount": 1800.0, "gross_amount": 3600.0,
+                                         "refund": {"amount": 1800.0, "date": "2026-09-05",
+                                                    "reason": "half"}}})
+        for piece in ("2026-09-05 04:00:00", "退款", "Matt", "¥1,800.00", "half", "现 ¥1,800.00"):
+            self.assertIn(piece, refund)
+        log = self.hist({"changed_at": "t", "action": "class_log", "changed_by": None,
+                         "snapshot": {"name": "羽毛球", "events": [
+                             {"date": "2026-08-17", "kind": "attended"},
+                             {"date": "2026-08-21", "kind": "missed_us"}]}})
+        for piece in ("记录上课", "羽毛球", "2026-08-17 上了", "2026-08-21 没去"):
+            self.assertIn(piece, log)
+        gone = self.hist({"changed_at": "t", "action": "package_delete", "changed_by": None,
+                          "snapshot": {"name": "羽毛球", "class_count": 5,
+                                       "events": [{}, {}, {}]}})
+        for piece in ("删除课程", "羽毛球", "5节", "3 已记录"):
+            self.assertIn(piece, gone)
+        edited = self.hist({"changed_at": "t", "action": "update", "changed_by": None,
+                            "snapshot": {"amount": 1700.0, "gross_amount": 3500.0,
+                                         "refunded": 1800.0, "paid": True,
+                                         "paid_date": "2026-08-15"}})
+        self.assertIn("¥1,700.00 (原价 ¥3,500.00)", edited)
+        self.assertIn("付款日期 2026-08-15", edited)
+        old = self.hist({"changed_at": "t", "action": "create", "changed_by": "wife",
+                         "snapshot": {"amount": 3600.0, "paid": False}})
+        self.assertIn("创建 · wife · ¥3,600.00", old)
+        self.assertNotIn("原价", old)
+
+    def test_every_interpolation_in_the_new_markup_is_escaped(self):
+        """P6 / the stored-XSS guard, for the new render paths: a planted
+        reason, course name or description must come out as text."""
+        payload = "<img src=x onerror=alert(1)>"
+        row = dict(self.PAID, description=payload,
+                   refunds=[dict(self.PAID["refunds"][0], reason=payload)],
+                   package=dict(self.PAID["package"], name=payload))
+        for html in (self.item(row), self.run_js("refundBoxHtml(expenses[0])", [row]),
+                     self.hist({"changed_at": "t", "action": "refund", "changed_by": payload,
+                                "snapshot": {"amount": 1, "refund": {"amount": 1,
+                                                                     "reason": payload}}}),
+                     self.hist({"changed_at": "t", "action": "package_create",
+                                "changed_by": None, "snapshot": {"name": payload,
+                                                                 "class_count": 1}})):
+            self.assertNotIn("<img", html)
+            self.assertIn("&lt;img", html)
+
+
+@unittest.skipUnless(shutil.which("node"), "node not available to run the portal's JS")
+class RefundHandlerTests(unittest.TestCase):
+    """Executes the real per-item click handler for the refund paths."""
+
+    PORTAL = Path(__file__).resolve().parent.parent / "app" / "portal.html"
+
+    def run_handler(self, driver: str, inputs: dict | None = None,
+                    response: dict | None = None, reject: str | None = None,
+                    confirmed: bool = True, reject_answered: bool = True) -> dict:
+        import json
+
+        src = self.PORTAL.read_text(encoding="utf-8")
+        start = src.index("  // ---- per-item actions ----")
+        end = src.index("  // ---- class tracker: fetch + actions ----")
+        handler = src[start:end]
+        self.assertIn('act === "refund"', handler, "handler markers moved")
+        self.assertEqual(handler.count("addEventListener("), 1)
+        body_fn = src[src.index("  function refundBody(id, box) {"):src.index("  // One history line.")]
+        script = f"""
+var handlerFn = null, apiCalls = [], toasts = [], confirms = [], refreshes = 0;
+var confirmed = {json.dumps(confirmed)};
+var refundBusy = {{}};
+// PENDING models a request still in flight: the chain holds its callbacks
+// until resolveHeld() lets the answer arrive, later than its context
+var PENDING = false, held = [];
+function resolveHeld(value) {{ var fns = held; held = []; fns.forEach(function (f) {{ f(value); }}); }}
+var document = {{addEventListener: function (_e, fn) {{ handlerFn = fn; }}}};
+function confirm(m) {{ confirms.push(m); return confirmed; }}
+function toast(m, ms) {{ toasts.push(String(m)); }}
+function refresh() {{ refreshes++; }}
+function t(k) {{ return k; }}
+function money(n) {{ return "¥" + Number(n).toFixed(2); }}
+function todayStr() {{ return "2026-09-05"; }}
+function esc(s) {{ return String(s == null ? "" : s); }}
+function refundBoxHtml(e) {{ return "BOX:" + e.id; }}
+function refundHintText(e, amount, count) {{ return "HINT:" + amount + ":" + count; }}
+var hintEl = {{textContent: ""}};
+function editBoxHtml(e) {{ return "EDIT:" + e.id; }}
+function histLineHtml(h) {{ return "H"; }}
+var CATS = [], STR = {{zh: {{cat: {{}}}}}}, lang = "zh";
+var expenses = [{{id: "r1", paid: true, amount: 1800, gross_amount: 3600}}];
+var REJECT = {json.dumps(reject)};
+var REJECT_ANSWERED = {json.dumps(bool(reject_answered))};
+function api(name, body) {{
+  apiCalls.push({{name: name, body: body}});
+  if (PENDING) {{
+    var holding = {{ then: function (f) {{ held.push(f); return holding; }},
+                     catch: function () {{ return holding; }} }};
+    return holding;
+  }}
+  var chain = {{
+    then: function (f) {{ if (!REJECT) f({json.dumps(response or {})}); return chain; }},
+    catch: function (f) {{ if (REJECT) {{ var err = new Error(REJECT); err.answered = REJECT_ANSWERED; f(err); }} return chain; }},
+  }};
+  return chain;
+}}
+var INPUTS = {json.dumps(inputs or {})};
+var rbox = {{style: {{display: "none"}}, innerHTML: "", onclick: null, oninput: null,
+  querySelector: function (sel) {{
+    var key = sel.slice(1);
+    if (key === "r-hint") return hintEl;
+    if (!(key in INPUTS)) return null;
+    return {{value: INPUTS[key], getAttribute: function (a) {{ return a === "data-current" ? "10" : null; }}}};
+  }}}};
+var hbox = {{style: {{display: "none"}}, innerHTML: ""}};
+var itemEl = {{getAttribute: function (a) {{ return a === "data-id" ? "r1" : null; }},
+  querySelector: function (sel) {{ return sel === ".refundbox" ? rbox
+    : sel === ".histbox" ? hbox : {{style: {{display: "none"}}}}; }}}};
+function makeEv(act, unrefundEl) {{
+  var btn = {{getAttribute: function (a) {{ return a === "data-act" ? act : null; }},
+              closest: function (sel) {{ return sel === ".item" ? itemEl : null; }}}};
+  return {{stopPropagation: function () {{}}, preventDefault: function () {{}},
+    target: {{closest: function (sel) {{
+      if (sel === "[data-unrefund]") return unrefundEl || null;
+      if (sel === "button[data-act]") return act ? btn : null;
+      return null; }}}}}};
+}}
+// ONE save button per box, with a real `disabled`: a browser fires no click
+// on a disabled button, so a driver's tap while it is disabled dispatches
+// nothing. A fresh stub per tap had no `disabled` at all, and deleting the
+// line that sets it survived every test here (the final verifier's mutation).
+var saveBtn = {{disabled: false, getAttribute: function (a) {{ return a === "data-r" ? "save" : null; }}}};
+var cancelBtn = {{disabled: false, getAttribute: function (a) {{ return a === "data-r" ? "cancel" : null; }}}};
+function boxEv(r) {{
+  var b = r === "save" ? saveBtn : cancelBtn;
+  return {{stopPropagation: function () {{}}, preventDefault: function () {{}},
+    target: {{closest: function (sel) {{ return sel === "button[data-r]" ? b : null; }}}}}};
+}}
+var blockedTaps = 0;
+function tapSave() {{ if (saveBtn.disabled) {{ blockedTaps++; return; }} rbox.onclick(boxEv("save")); }}
+{body_fn}
+{handler}
+{driver}
+console.log(JSON.stringify({{apiCalls: apiCalls, toasts: toasts, confirms: confirms,
+  refreshes: refreshes, display: rbox.style.display, box: rbox.innerHTML,
+  hasOnclick: typeof rbox.onclick === "function",
+  hint: hintEl.textContent, busy: refundBusy,
+  saveDisabled: saveBtn.disabled, blockedTaps: blockedTaps,
+  hist: {{display: hbox.style.display, html: hbox.innerHTML}}}}));
+"""
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True,
+                             timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    FIELDS = {"r-amt": "1800", "r-date": "2026-09-05", "r-reason": "half", "r-count": "5"}
+
+    def test_tapping_refund_opens_the_box_and_saving_posts_what_she_typed(self):
+        out = self.run_handler(
+            'handlerFn(makeEv("refund")); rbox.onclick(boxEv("save"));',
+            inputs=self.FIELDS,
+            response={"ok": True, "refund": {"amount": 1800, "date": "2026-09-05"}})
+        self.assertEqual(out["display"], "block")
+        self.assertEqual(out["box"], "BOX:r1")
+        self.assertEqual(out["apiCalls"], [{"name": "refund", "body": {
+            "id": "r1", "amount": 1800.0, "date": "2026-09-05", "reason": "half",
+            "resize_package_to": 5}}])
+        # the toast quotes the SERVER's figures, and the list is refetched
+        self.assertEqual(out["toasts"], ["refunded_toast · ¥1800.00 · 2026-09-05"])
+        self.assertEqual(out["refreshes"], 1)
+
+    def test_the_confirmation_quotes_the_servers_rate_whether_or_not_she_resized(self):
+        out = self.run_handler(
+            'handlerFn(makeEv("refund")); rbox.onclick(boxEv("save"));',
+            inputs=self.FIELDS,
+            response={"ok": True, "refund": {"amount": 1800, "date": "2026-09-05"},
+                      "resized": False,
+                      "package": {"kind": "per_class", "summary": {"rate": 180, "remaining": 5}}})
+        self.assertEqual(out["toasts"],
+                         ["refunded_toast · ¥1800.00 · 2026-09-05 · cls_rate ¥180.00 · cls_left 5cls_cls"])
+        period = self.run_handler(
+            'handlerFn(makeEv("refund")); rbox.onclick(boxEv("save"));',
+            inputs=self.FIELDS,
+            response={"ok": True, "refund": {"amount": 750, "date": "2026-09-05"},
+                      "package": {"kind": "period", "summary": {"rate": 250, "owed": 3}}})
+        self.assertEqual(period["toasts"], ["refunded_toast · ¥750.00 · 2026-09-05 · cls_rate ¥250.00"])
+
+    def test_the_preview_follows_what_she_types(self):
+        """The wiring between the inputs and the hint — the LESSONS §5 surface.
+        `refundHintText` is tested on its own; this executes `oninput`."""
+        out = self.run_handler('handlerFn(makeEv("refund")); rbox.oninput();',
+                               inputs={"r-amt": "1800", "r-date": "2026-09-05",
+                                       "r-reason": "", "r-count": "5"})
+        self.assertEqual(out["hint"], "HINT:1800:5")
+        blank = self.run_handler('handlerFn(makeEv("refund")); rbox.oninput();',
+                                 inputs={"r-amt": "", "r-date": "", "r-reason": "", "r-count": ""})
+        self.assertEqual(blank["hint"], "HINT:0:0")        # empty fields are not NaN
+        # a term fee or a payment with no course has no count field: a no-op,
+        # never a throw that would leave the box dead
+        none = self.run_handler('handlerFn(makeEv("refund")); rbox.oninput();',
+                                inputs={"r-amt": "100", "r-date": "", "r-reason": ""})
+        self.assertEqual(none["hint"], "")
+
+    def test_the_history_box_renders_each_line_and_closes_on_a_second_tap(self):
+        out = self.run_handler('handlerFn(makeEv("hist"));',
+                               response={"ok": True, "history": [{"a": 1}, {"a": 2}]})
+        self.assertEqual(out["apiCalls"], [{"name": "history", "body": {"id": "r1"}}])
+        self.assertEqual(out["hist"], {"display": "block", "html": "HH"})
+        empty = self.run_handler('handlerFn(makeEv("hist"));', response={"ok": True, "history": []})
+        self.assertEqual(empty["hist"]["html"], '<div class="hist">–</div>')
+        twice = self.run_handler('handlerFn(makeEv("hist")); handlerFn(makeEv("hist"));',
+                                 response={"ok": True, "history": [{}]})
+        self.assertEqual(twice["hist"]["display"], "none")
+        self.assertEqual(len(twice["apiCalls"]), 1)
+
+    def test_a_second_tap_closes_the_box_and_cancel_posts_nothing(self):
+        out = self.run_handler('handlerFn(makeEv("refund")); handlerFn(makeEv("refund"));',
+                               inputs=self.FIELDS)
+        self.assertEqual(out["display"], "none")
+        self.assertEqual(out["apiCalls"], [])
+        out = self.run_handler('handlerFn(makeEv("refund")); rbox.onclick(boxEv("cancel"));',
+                               inputs=self.FIELDS)
+        self.assertEqual((out["display"], out["apiCalls"]), ("none", []))
+
+    def test_a_refusal_reaches_her_as_the_servers_words(self):
+        out = self.run_handler(
+            'handlerFn(makeEv("refund")); rbox.onclick(boxEv("save"));',
+            inputs=self.FIELDS, reject="refund ¥1800.00 is more than is left")
+        self.assertEqual(out["toasts"], ["refund ¥1800.00 is more than is left"])
+        self.assertEqual(out["refreshes"], 0)
+        self.assertEqual(out["busy"], {}, "an answered refusal must release the row")
+
+    def test_two_taps_on_save_record_one_refund(self):
+        """The cross-model review's finding: no in-flight guard, and the store
+        accepts a second refund equal to what is left, so ¥100 meant became
+        ¥200 back. Same lock as the class log, same no-timer trade."""
+        out = self.run_handler(
+            'PENDING = true; handlerFn(makeEv("refund")); tapSave(); tapSave(); tapSave();',
+            inputs=self.FIELDS)
+        self.assertEqual(len(out["apiCalls"]), 1)
+        self.assertEqual(out["busy"], {"r1": True})
+        # the button itself is dead while the request is in flight — the
+        # browser's own guard, which the lock backs up
+        self.assertTrue(out["saveDisabled"])
+        self.assertEqual(out["blockedTaps"], 2)
+        # …and even with the button forced live, the lock alone holds
+        forced = self.run_handler(
+            'PENDING = true; handlerFn(makeEv("refund")); tapSave();'
+            'saveBtn.disabled = false; rbox.onclick(boxEv("save")); rbox.onclick(boxEv("save"));',
+            inputs=self.FIELDS)
+        self.assertEqual(len(forced["apiCalls"]), 1)
+        # once the answer arrives the row is released, and a NEW refund can
+        # be recorded (the row will have been re-rendered by refresh())
+        released = self.run_handler(
+            'PENDING = true; handlerFn(makeEv("refund")); tapSave(); tapSave();'
+            'resolveHeld({ok: true, refund: {amount: 1800, date: "2026-09-05"}});'
+            'PENDING = false; saveBtn.disabled = false; tapSave();',
+            inputs=self.FIELDS)
+        self.assertEqual(len(released["apiCalls"]), 2)
+        self.assertEqual(released["busy"], {})
+        self.assertEqual(released["refreshes"], 2)   # one per answered refund
+
+    def test_a_lost_response_keeps_the_row_locked(self):
+        """A rejection the server did not answer is ambiguous — the refund may
+        have committed — so no retry is permitted until reload (LESSONS §6)."""
+        out = self.run_handler(
+            'handlerFn(makeEv("refund")); tapSave(); tapSave();',
+            inputs=self.FIELDS, reject="Failed to fetch", reject_answered=False)
+        self.assertEqual(len(out["apiCalls"]), 1)
+        self.assertEqual(out["busy"], {"r1": True})
+        self.assertTrue(out["saveDisabled"], "the button came back after a lost response")
+        self.assertEqual(out["toasts"], ["Failed to fetch"])
+        # an answered refusal, by contrast, gives the button back
+        answered = self.run_handler(
+            'handlerFn(makeEv("refund")); tapSave();',
+            inputs=self.FIELDS, reject="refused", reject_answered=True)
+        self.assertFalse(answered["saveDisabled"])
+
+    def test_the_undo_asks_first_naming_the_refund_and_then_deletes_it(self):
+        undo = ('var x = {getAttribute: function (a) { return a === "data-unrefund" ? "f1" '
+                ': a === "data-when" ? "2026-09-05 · ¥1800.00" : null; }};')
+        out = self.run_handler(undo + 'handlerFn(makeEv(null, x));')
+        self.assertEqual(out["confirms"], ["refund_confirm_undo\n2026-09-05 · ¥1800.00"])
+        self.assertEqual(out["apiCalls"], [{"name": "refund-delete", "body": {"refund_id": "f1"}}])
+        self.assertEqual(out["toasts"], ["refund_removed"])
+        self.assertEqual(out["refreshes"], 1)
+        declined = self.run_handler(undo + 'handlerFn(makeEv(null, x));', confirmed=False)
+        self.assertEqual(declined["apiCalls"], [])
+
+
+@unittest.skipUnless(shutil.which("node"), "node not available to run the portal's JS")
+class RefundReleaseOrderTests(unittest.TestCase):
+    """WHEN the refund lock releases, on real promises.
+
+    The synchronous harness above cannot see promise order. Until the row is
+    re-rendered, the old box is still on screen with a cleared amount field,
+    and only the lock keeps it inert — so the release must wait for
+    refresh()'s round-trip, not merely for the refund's answer. The final
+    verifier's mutation (release inside the success handler, before the
+    refresh) survived the suite; this pins the placement."""
+
+    PORTAL = Path(__file__).resolve().parent.parent / "app" / "portal.html"
+
+    def test_the_lock_outlives_the_re_render_the_refund_triggers(self):
+        import json
+
+        src = self.PORTAL.read_text(encoding="utf-8")
+        start = src.index("  // ---- per-item actions ----")
+        end = src.index("  // ---- class tracker: fetch + actions ----")
+        handler = src[start:end]
+        body_fn = src[src.index("  function refundBody(id, box) {"):src.index("  // One history line.")]
+        script = """
+var handlerFn = null, refundBusy = {}, log = [];
+var document = {addEventListener: function (_e, fn) { handlerFn = fn; }};
+function t(k) { return k; } function money(n) { return "¥" + n; } function esc(s) { return String(s); }
+function todayStr() { return "2026-09-05"; }
+function toast(m) { log.push("toast"); }
+function refundBoxHtml() { return ""; } function editBoxHtml() { return ""; } function histLineHtml() { return ""; }
+function refundHintText() { return ""; }
+var CATS = [], STR = {zh: {cat: {}}}, lang = "zh";
+var expenses = [{id: "r1", paid: true, amount: 1800, gross_amount: 3600}];
+var answer, listAnswer;
+function api(name) {
+  if (name === "refund") return new Promise(function (res) { answer = res; });
+  return new Promise(function (res) { listAnswer = res; });
+}
+// the real refresh() awaits /api/list and then renders; modelled as a
+// promise that resolves only when the driver lets the list answer arrive
+function refresh() { log.push("refresh-start"); return api("list").then(function () { log.push("rendered"); }); }
+var box = {style: {display: "none"}, innerHTML: "", querySelector: function (sel) {
+  return {value: sel === ".r-amt" ? "10" : "", getAttribute: function () { return null; }}; }};
+var itemEl = {getAttribute: function (a) { return a === "data-id" ? "r1" : null; },
+  querySelector: function () { return box; }};
+var save = {disabled: false, getAttribute: function (a) { return a === "data-r" ? "save" : null; }};
+var btn = {getAttribute: function (a) { return a === "data-act" ? "refund" : null; },
+  closest: function () { return itemEl; }};
+var ev = {target: {closest: function (sel) { return sel === "button[data-act]" ? btn : null; }}};
+var ev2 = {stopPropagation: function () {}, preventDefault: function () {},
+  target: {closest: function (sel) { return sel === "button[data-r]" ? save : null; }}};
+""" + body_fn + handler + """
+(async function () {
+  handlerFn(ev); box.onclick(ev2);
+  var tick = function () { return new Promise(function (r) { setTimeout(r, 0); }); };
+  answer({ok: true, refund: {amount: 10, date: "2026-09-05"}});
+  await tick();
+  log.push("busy-after-answer:" + !!refundBusy["r1"]);
+  listAnswer({expenses: []});
+  await tick();
+  log.push("busy-after-render:" + !!refundBusy["r1"]);
+  console.log(JSON.stringify(log));
+})();
+"""
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), [
+            "toast", "refresh-start", "busy-after-answer:true",
+            "rendered", "busy-after-render:false",
+        ])
+
+
+@unittest.skipUnless(shutil.which("node"), "node not available to run the portal's JS")
+class ClassArchivePartitionTests(unittest.TestCase):
+    """Every course reaches the markup exactly once, in the section it
+    belongs to — a finished course moves to 已结课 rather than vanishing.
+    Membership, not presence (LESSONS §12)."""
+
+    PORTAL = Path(__file__).resolve().parent.parent / "app" / "portal.html"
+
+    def package(self, pid, archived=False, kind="per_class", **over):
+        p = {"id": pid, "name": "课" + pid, "period_label": None, "kind": kind,
+             "archived": archived, "class_count": 10, "events": [],
+             "expense": {"id": "x" + pid, "date": "2026-08-20", "amount": 2200.0,
+                         "description": "pay " + pid, "category": "aden-sports",
+                         "paid": True},
+             "summary": {"remaining": 10, "class_count": 10, "rate": 220.0, "used": 0,
+                         "overrun": 0, "remaining_amount": 2200.0, "owed": 0,
+                         "reclaimable": 0, "forfeited": 0, "owed_amount": 0.0,
+                         "reclaimable_amount": 0.0, "forfeited_amount": 0.0}}
+        p.update(over)
+        return p
+
+    def render(self, packages: list, open_ids=(), edit_ids=(), arch_open=None) -> str:
+        """`arch_open`: what the EXISTING <details> on screen reports — None
+        for no such element (first paint), True/False for its open state."""
+        import json
+
+        src = self.PORTAL.read_text(encoding="utf-8")
+        block = src[src.index("  function clsLine(p) {"):src.index("  function render() {")]
+        self.assertIn("function pkgRowHtml", block, "block markers moved")
+        prev = "null" if arch_open is None else f"{{open: {json.dumps(arch_open)}}}"
+        script = f"""
+var packages = {json.dumps(packages)};
+var candidates = [];
+var openPkgs = {json.dumps({i: True for i in open_ids})};
+var clsEdit = {json.dumps({i: True for i in edit_ids})};
+var clsDates = {{}}, clsBusy = {{}};
+function todayStr() {{ return "2026-08-11"; }}
+var lang = "zh";
+var STR = {{zh: {{ev: {{attended:"上了", missed_school:"停课", missed_us:"没去"}}}}}};
+var nodes = {{}};
+// the real element answers querySelector; the stub answers with what the
+// previous paint left on screen, which is all renderClasses asks it
+function $(id) {{ if (!nodes[id]) nodes[id] = {{innerHTML:"", value:"", textContent:"",
+  querySelector: function (sel) {{ return sel === "details.arch" ? {prev} : null; }}}};
+  return nodes[id]; }}
+function esc(s) {{ return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {{
+  return {{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[c]; }}); }}
+function t(k) {{ return k; }}
+function money(n) {{ return "¥" + Number(n).toFixed(2); }}
+function money0(n) {{ return "¥" + Math.round(Number(n)); }}
+function categoryLabel(e) {{ return e.category || ""; }}
+{block}
+renderClasses();
+console.log(nodes["classesBody"].innerHTML);
+"""
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True,
+                             timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout
+
+    def test_each_course_appears_exactly_once_in_its_own_section(self):
+        html = self.render([self.package("a"), self.package("b", archived=True),
+                            self.package("c")])
+        arch = html.index('<details class="arch">')
+        for pid, expected in (("a", "live"), ("b", "done"), ("c", "live")):
+            marker = f'data-pkg="{pid}"'
+            self.assertEqual(html.count(marker), 1, f"{pid} rendered {html.count(marker)} times")
+            self.assertEqual("done" if html.index(marker) > arch else "live", expected, pid)
+        self.assertIn("2 cls_cls", html)                 # the header counts running courses
+        self.assertIn("cls_archived_sec</span><span>1</span>", html)
+
+    def test_with_nothing_finished_there_is_no_finished_section(self):
+        html = self.render([self.package("a")])
+        self.assertNotIn("details", html)
+        self.assertNotIn("cls_archived_sec", html)
+
+    def test_the_finished_group_stays_open_across_the_re_render_a_tap_causes(self):
+        """Seen in the browser, not by the suite: every tap rebuilds the tab,
+        a rebuilt <details> is closed, so opening a finished course collapsed
+        the group it sits in. The state comes from the element on screen."""
+        pk = [self.package("a"), self.package("b", archived=True)]
+        self.assertIn('<details class="arch" open=""', self.render(pk, arch_open=True))
+        self.assertIn('<details class="arch"><summary>', self.render(pk, arch_open=False))
+        self.assertIn('<details class="arch"><summary>', self.render(pk))  # first paint: closed
+
+    def test_with_everything_finished_the_running_list_says_so_and_the_courses_survive(self):
+        html = self.render([self.package("a", archived=True)])
+        self.assertIn("cls_none", html)
+        self.assertEqual(html.count('data-pkg="a"'), 1)
+        self.assertIn('<details class="arch">', html)
+
+    def test_the_management_row_offers_finish_or_restore_by_state(self):
+        live = self.render([self.package("a")], open_ids=["a"])
+        self.assertIn('data-c="editpkg"', live)
+        self.assertIn('data-c="archpkg"', live)
+        self.assertNotIn('data-c="unarchpkg"', live)
+        done = self.render([self.package("a", archived=True)], open_ids=["a"])
+        self.assertIn('data-c="unarchpkg"', done)
+        self.assertNotIn('data-c="archpkg"', done)
+        # a closed row hides both button rows
+        closed = self.render([self.package("a")])
+        self.assertEqual(closed.count('class="btns" hidden=""'), 2)
+
+    def test_the_editor_renders_only_when_asked_and_shows_the_current_values(self):
+        html = self.render([self.package("a", kind="period", period_label="秋季",
+                                         class_count=8)],
+                           open_ids=["a"], edit_ids=["a"])
+        self.assertIn('id="c-name-a" value="课a"', html)
+        self.assertIn('id="c-count-a" value="8"', html)
+        self.assertIn('id="c-period-a" value="秋季"', html)
+        self.assertIn('data-c="savepkg"', html)
+        per_class = self.render([self.package("a")], open_ids=["a"], edit_ids=["a"])
+        self.assertNotIn("c-period-a", per_class)
+        self.assertNotIn("c-name-a", self.render([self.package("a")], open_ids=["a"]))
+        # edit state without an open row draws nothing — the row was closed
+        self.assertNotIn("c-name-a", self.render([self.package("a")], edit_ids=["a"]))
+
+
+@unittest.skipUnless(shutil.which("node"), "node not available to run the portal's JS")
+class ClassEditHandlerTests(unittest.TestCase):
+    """The management buttons through the real classesBody click handler,
+    on the harness ClassTabInteractionTests already proved against it."""
+
+    PORTAL = ClassTabInteractionTests.PORTAL
+    run_handler = ClassTabInteractionTests.run_handler
+
+    def tap(self, act: str, extra: str = "") -> str:
+        # the save branch calls clsEditBody, which lives outside the handler
+        # slice: take the REAL one from the portal rather than a stub of it —
+        # a stub is a second implementation of what the test is checking
+        src = self.PORTAL.read_text(encoding="utf-8")
+        body_fn = src[src.index("  function clsEditBody(id, kind) {"):
+                      src.index("  function pkgRowHtml(p, title) {")]
+        return f"""
+{body_fn}
+{extra}
+var ev = {{stopPropagation: function () {{}}, target: {{closest: function (sel) {{
+  if (sel === "[data-pkg]") return itemEl;
+  if (sel === "button[data-c]") {{ button._c = "{act}"; return button; }}
+  return null; }}}}}};
+handlerFn(ev);
+"""
+
+    EDIT_INPUTS = """
+document.getElementById = function (i) {
+  return ({"c-name-p1": {value: " 羽毛球 "}, "c-count-p1": {value: "5"},
+           "c-period-p1": {value: " 秋季 "}})[i] || null; };
+"""
+
+    def test_edit_toggles_the_editor_and_cancel_closes_it(self):
+        out = self.run_handler(self.tap("editpkg")
+                               + 'if (!clsEdit["p1"]) throw new Error("editor did not open");')
+        self.assertEqual(out["rendered"], 1)
+        self.assertEqual(out["apiCalls"], [])
+        out = self.run_handler(self.tap("editpkg") + self.tap("editpkg")
+                               + 'if (clsEdit["p1"]) throw new Error("second tap did not close it");')
+        self.assertEqual(out["rendered"], 2)
+        out = self.run_handler(self.tap("editpkg") + self.tap("cancelpkg")
+                               + 'if (clsEdit["p1"]) throw new Error("cancel did not close it");')
+        self.assertEqual(out["apiCalls"], [])
+
+    def test_save_posts_the_typed_fields_as_a_course_update(self):
+        out = self.run_handler(self.tap("savepkg", self.EDIT_INPUTS))
+        self.assertEqual(out["apiCalls"], [{"name": "classes-update", "body": {
+            "id": "p1", "fields": {"name": "羽毛球", "class_count": 5}}}])
+        self.assertEqual(out["toasts"], ["saved"])
+        self.assertEqual(out["rendered"], 1)      # refreshClasses after success
+        period = self.run_handler(self.tap(
+            "savepkg", self.EDIT_INPUTS + 'packages = [{id: "p1", kind: "period"}];'))
+        self.assertEqual(period["apiCalls"][0]["body"]["fields"]["period_label"], "秋季")
+
+    def test_finishing_asks_first_and_restoring_does_not(self):
+        out = self.run_handler(self.tap("archpkg"))
+        self.assertEqual(out["confirms"], ["cls_confirm_archive"])
+        self.assertEqual(out["apiCalls"], [{"name": "classes-update", "body": {
+            "id": "p1", "fields": {"archived": True}}}])
+        declined = self.run_handler('confirmed = false;' + self.tap("archpkg"))
+        self.assertEqual(declined["apiCalls"], [])
+        back = self.run_handler(self.tap("unarchpkg"))
+        self.assertEqual(back["confirms"], [])
+        self.assertEqual(back["apiCalls"][0]["body"]["fields"], {"archived": False})
+
+    def test_save_with_the_editor_gone_posts_nothing_and_says_so(self):
+        gone = 'document.getElementById = function () { return null; };'
+        out = self.run_handler(self.tap("savepkg", gone))
+        self.assertEqual(out["apiCalls"], [])
+        self.assertEqual(out["toasts"], ["err"])
+
+    def test_a_button_the_handler_does_not_know_never_becomes_a_class_log(self):
+        """Everything past the management branches posts `act` as the event
+        kind. A new button that missed its branch used to fall straight
+        through into classes-log."""
+        out = self.run_handler(self.tap("bogus"))
+        self.assertEqual(out["apiCalls"], [])
+        self.assertEqual(out["busy"], {})
+        self.assertFalse(out["disabled"])
+
+    def test_typing_in_the_editor_does_not_close_the_row(self):
+        driver = """
+openPkgs["p1"] = true; clsEdit["p1"] = true;
+var ev = {target: {closest: function (sel) {
+  if (sel === "[data-pkg]") return itemEl;
+  if (sel === ".editbox") return {};
+  return null; }}};
+handlerFn(ev);
+"""
+        out = self.run_handler(driver)
+        self.assertEqual(out["openPkgs"], {"p1": True})
+        self.assertEqual(out["rendered"], 0)
+
+    def test_closing_a_row_drops_its_editor(self):
+        driver = """
+openPkgs["p1"] = true; clsEdit["p1"] = true;
+var ev = {target: {closest: function (sel) {
+  if (sel === "[data-pkg]") return itemEl;
+  return null; }}};
+handlerFn(ev);
+if (clsEdit["p1"]) throw new Error("the editor survived closing the row");
+"""
+        out = self.run_handler(driver)
+        self.assertEqual(out["openPkgs"], {"p1": False})
+        self.assertEqual(out["rendered"], 1)
+
+
+@unittest.skipUnless(shutil.which("node"), "node not available to run the portal's JS")
+class StringTableParityTests(unittest.TestCase):
+    """The whole STR tree, evaluated rather than grepped. The top-level guard
+    stops scanning at `cat:{`, so the `act:` entries v0.13.0 added (seven new
+    history actions) sat below its horizon; a missing one renders the raw
+    action key in the language she does not open to check."""
+
+    PORTAL = Path(__file__).resolve().parent.parent / "app" / "portal.html"
+
+    def tables(self) -> dict:
+        import json
+
+        src = self.PORTAL.read_text(encoding="utf-8")
+        block = src[src.index("  var STR = {"):src.index("  var lang =")]
+        out = subprocess.run(["node", "-e", block + "\nconsole.log(JSON.stringify(STR));"],
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_both_languages_carry_the_same_keys_at_every_depth(self):
+        tables = self.tables()
+
+        def paths(node, prefix=""):
+            out = set()
+            for k, v in node.items():
+                out.add(prefix + k)
+                if isinstance(v, dict):
+                    out |= paths(v, prefix + k + ".")
+            return out
+
+        zh, en = paths(tables["zh"]), paths(tables["en"])
+        self.assertGreater(len(zh), 150, "the table shrank; the slice moved")
+        self.assertEqual(zh - en, set(), "English is missing keys the Chinese table has")
+        self.assertEqual(en - zh, set(), "Chinese is missing keys the English table has")
+
+    def test_every_history_action_has_words_in_both_languages(self):
+        from app.models import HISTORY_ACTIONS
+
+        tables = self.tables()
+        for lang in ("zh", "en"):
+            self.assertEqual(set(tables[lang]["act"]), set(HISTORY_ACTIONS), lang)
+
+    def test_every_key_the_page_asks_for_exists(self):
+        src = self.PORTAL.read_text(encoding="utf-8")
+        tables = self.tables()
+        asked = set(re.findall(r'\bt\("([a-z_]+)"\)', src))
+        self.assertGreater(len(asked), 60)
+        for lang in ("zh", "en"):
+            missing = sorted(k for k in asked if not isinstance(tables[lang].get(k), str))
+            self.assertEqual(missing, [], f"{lang}: t() keys with no string")
+
+
+@unittest.skipUnless(shutil.which("node"), "node not available to run the portal's JS")
+class ClassRefreshRequestTests(unittest.TestCase):
+    """What the Classes tab ASKS the server for. The partition test feeds
+    `packages` directly, so a tab that stopped requesting archived rows
+    would pass it with an empty 已结课 and the finished courses invisible
+    again — the LESSONS §12 defect, back with a green suite."""
+
+    PORTAL = Path(__file__).resolve().parent.parent / "app" / "portal.html"
+
+    def test_the_tab_requests_archived_courses_too(self):
+        import json
+
+        src = self.PORTAL.read_text(encoding="utf-8")
+        block = src[src.index("  var clsGen = 0;"):
+                    src.index('  $("clsExpense").addEventListener("change", clsRateHint);')]
+        self.assertIn("function refreshClasses()", block, "block markers moved")
+        script = f"""
+var apiCalls = [], packages = [], candidates = [], rendered = 0;
+var serverToday = null, serverTodayAt = 0, serverMidnightIn = null;
+function api(name, body) {{ apiCalls.push({{name: name, body: body}});
+  return {{then: function (f) {{ f({{packages: [{{id: "a", archived: true}}], candidates: []}});
+    return {{catch: function () {{}}}}; }}}}; }}
+function renderClasses() {{ rendered++; }}
+function toast() {{}}
+{block}
+refreshClasses();
+console.log(JSON.stringify({{apiCalls: apiCalls, packages: packages, rendered: rendered}}));
+"""
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        got = json.loads(out.stdout)
+        self.assertEqual(got["apiCalls"], [{"name": "classes-list", "body": {"include_archived": True}}])
+        self.assertEqual(got["packages"], [{"id": "a", "archived": True}])
+        self.assertEqual(got["rendered"], 1)
 
 
 class ToastLegibilityTests(unittest.TestCase):
